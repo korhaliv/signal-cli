@@ -150,6 +150,17 @@ public class DbusReceiveMessageHandler implements Manager.ReceiveMessageHandler 
             final var sticker = message.sticker().get();
             extras.put("sticker", new Variant<>(getStickerMap(sticker), "a{sv}"));
         }
+
+        if (message.sharedContacts().size() > 0){         
+            var contacts = message.sharedContacts()
+            .stream()
+            .map(this::getSharedContactsMap)
+            .toList();
+
+            extras.put("contacts", new Variant<>(contacts,  "aa{sv}"));
+        }
+
+
         extras.put("isViewOnce", new Variant<>(message.isViewOnce()));
         return extras;
     }
@@ -168,6 +179,41 @@ public class DbusReceiveMessageHandler implements Manager.ReceiveMessageHandler 
                 new Variant<>(sticker.packId().serialize()),
                 "stickerId",
                 new Variant<>(sticker.stickerId()));
+    }
+
+    private Map<String, Variant<?>> getSharedContactsMap(final MessageEnvelope.Data.SharedContact contact) {
+        final var map = new HashMap<String, Variant<?>>();
+        var name = contact.name();
+
+        if (name.display().isPresent() && !name.display().get().isBlank()) {
+            map.put("display",  new Variant<>(name.display().get()));
+        }
+        if (name.given().isPresent() && !name.given().get().isBlank()) {
+            map.put("firstName",  new Variant<>(name.given().get()));
+        }
+        if (name.middle().isPresent() && !name.middle().get().isBlank()) {
+            map.put("middleName",  new Variant<>(name.middle().get()));
+        }
+        if (name.family().isPresent() && !name.family().get().isBlank()) {
+            map.put("familyName",  new Variant<>(name.family().get()));
+        }
+        if (name.prefix().isPresent() && !name.prefix().get().isBlank()) {
+            map.put("prefixName",  new Variant<>(name.prefix().get()));
+        }
+        if (name.suffix().isPresent() && !name.suffix().get().isBlank()) {
+            map.put("suffixName",  new Variant<>(name.suffix().get()));
+        }
+
+        if (contact.phone().size() > 0) {
+            var phoneNumbers = new ArrayList<String>();
+            for (var phone : contact.phone()) {
+                phoneNumbers.add( phone.value());
+            }
+
+            map.put("phones", new Variant<>(String.join(", ", phoneNumbers)));
+        }
+
+        return map;
     }
 
     private Map<String, Variant<?>> getReactionMap(final MessageEnvelope.Data.Reaction reaction) {
