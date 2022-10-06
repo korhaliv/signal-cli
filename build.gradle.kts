@@ -3,10 +3,10 @@ plugins {
     application
     eclipse
     `check-lib-versions`
-    id("org.graalvm.buildtools.native") version "0.9.11"
+    id("org.graalvm.buildtools.native") version "0.9.14"
 }
 
-version = "0.10.8"
+version = "0.11.1"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -33,12 +33,12 @@ repositories {
 
 dependencies {
     implementation("org.bouncycastle", "bcprov-jdk15on", "1.70")
-    implementation("com.fasterxml.jackson.core", "jackson-databind", "2.13.3")
+    implementation("com.fasterxml.jackson.core", "jackson-databind", "2.13.4")
     implementation("net.sourceforge.argparse4j", "argparse4j", "0.9.0")
-    implementation("com.github.hypfvieh", "dbus-java-transport-native-unixsocket", "4.1.0")
-    implementation("org.slf4j", "slf4j-api", "1.7.36")
-    implementation("ch.qos.logback", "logback-classic", "1.2.11")
-    implementation("org.slf4j", "jul-to-slf4j", "1.7.36")
+    implementation("com.github.hypfvieh", "dbus-java-transport-native-unixsocket", "4.2.1")
+    implementation("org.slf4j", "slf4j-api", "2.0.3")
+    implementation("ch.qos.logback", "logback-classic", "1.4.3")
+    implementation("org.slf4j", "jul-to-slf4j", "2.0.3")
     implementation(project(":lib"))
 }
 
@@ -74,10 +74,12 @@ task("fatJar", type = Jar::class) {
         "META-INF/*.SF",
         "META-INF/*.DSA",
         "META-INF/*.RSA",
-        "META-INF/NOTICE",
-        "META-INF/LICENSE",
+        "META-INF/NOTICE*",
+        "META-INF/LICENSE*",
+        "META-INF/INDEX.LIST",
         "**/module-info.class"
     )
+    duplicatesStrategy = DuplicatesStrategy.WARN
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
-    with(tasks.jar.get() as CopySpec)
+    with(tasks.jar.get())
 }

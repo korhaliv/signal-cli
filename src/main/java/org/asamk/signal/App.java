@@ -64,13 +64,16 @@ public class App {
                 .description("Commandline interface for Signal.")
                 .version(BaseConfig.PROJECT_NAME + " " + BaseConfig.PROJECT_VERSION);
 
-        parser.addArgument("-v", "--version").help("Show package version.").action(Arguments.version());
-        parser.addArgument("--verbose")
+        parser.addArgument("--version").help("Show package version.").action(Arguments.version());
+        parser.addArgument("-v", "--verbose")
                 .help("Raise log level and include lib signal logs. Specify multiple times for even more logs.")
                 .action(Arguments.count());
         parser.addArgument("--log-file")
                 .type(File.class)
                 .help("Write log output to the given file. If --verbose is also given, the detailed logs will only be written to the log file.");
+        parser.addArgument("--scrub-log")
+                .action(Arguments.storeTrue())
+                .help("Scrub possibly sensitive information from the log, like phone numbers and UUIDs.");
         parser.addArgument("-c", "--config")
                 .help("Set the path, where to store the config (Default: $XDG_DATA_HOME/signal-cli , $HOME/.local/share/signal-cli).");
 

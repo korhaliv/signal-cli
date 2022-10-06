@@ -132,13 +132,13 @@ public class SyncHelper {
                     final var contact = contactPair.second();
                     final var address = context.getRecipientHelper().resolveSignalServiceAddress(recipientId);
 
-                    var currentIdentity = account.getIdentityKeyStore().getIdentityInfo(recipientId);
+                    var currentIdentity = account.getIdentityKeyStore().getIdentityInfo(address.getServiceId());
                     VerifiedMessage verifiedMessage = null;
                     if (currentIdentity != null) {
                         verifiedMessage = new VerifiedMessage(address,
                                 currentIdentity.getIdentityKey(),
                                 currentIdentity.getTrustLevel().toVerifiedState(),
-                                currentIdentity.getDateAdded().getTime());
+                                currentIdentity.getDateAddedTimestamp());
                     }
 
                     var profileKey = account.getProfileStore().getProfileKey(recipientId);
@@ -308,6 +308,7 @@ public class SyncHelper {
             final var builder = contact == null ? Contact.newBuilder() : Contact.newBuilder(contact);
             if (c.getName().isPresent()) {
                 builder.withGivenName(c.getName().get());
+                builder.withFamilyName(null);
             }
             if (c.getColor().isPresent()) {
                 builder.withColor(c.getColor().get());
@@ -318,8 +319,7 @@ public class SyncHelper {
             if (c.getVerified().isPresent()) {
                 final var verifiedMessage = c.getVerified().get();
                 account.getIdentityKeyStore()
-                        .setIdentityTrustLevel(account.getRecipientTrustedResolver()
-                                        .resolveRecipientTrusted(verifiedMessage.getDestination()),
+                        .setIdentityTrustLevel(verifiedMessage.getDestination().getServiceId(),
                                 verifiedMessage.getIdentityKey(),
                                 TrustLevel.fromVerifiedState(verifiedMessage.getVerified()));
             }

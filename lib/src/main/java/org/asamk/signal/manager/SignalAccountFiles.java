@@ -65,6 +65,9 @@ public class SignalAccountFiles {
             } catch (NotRegisteredException | IOException | AccountCheckException e) {
                 logger.warn("Ignoring {}: {} ({})", a.number(), e.getMessage(), e.getClass().getSimpleName());
                 return null;
+            } catch (Throwable e) {
+                logger.error("Failed to load {}: {} ({})", a.number(), e.getMessage(), e.getClass().getSimpleName());
+                throw e;
             }
         }).filter(Objects::nonNull).toList();
 
@@ -149,6 +152,7 @@ public class SignalAccountFiles {
             var aciIdentityKey = KeyUtils.generateIdentityKeyPair();
             var pniIdentityKey = KeyUtils.generateIdentityKeyPair();
             var registrationId = KeyHelper.generateRegistrationId(false);
+            var pniRegistrationId = KeyHelper.generateRegistrationId(false);
 
             var profileKey = KeyUtils.createProfileKey();
             var account = SignalAccount.create(pathConfig.dataPath(),
@@ -158,6 +162,7 @@ public class SignalAccountFiles {
                     aciIdentityKey,
                     pniIdentityKey,
                     registrationId,
+                    pniRegistrationId,
                     profileKey,
                     trustNewIdentity);
 

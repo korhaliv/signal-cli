@@ -31,7 +31,16 @@ public class ServiceConfig {
     public static final AccountAttributes.Capabilities capabilities;
 
     static {
-        capabilities = new AccountAttributes.Capabilities(false, true, false, true, true, true, true, false, false);
+        capabilities = new AccountAttributes.Capabilities(false,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false);
 
         try {
             TrustStore contactTrustStore = new IasTrustStore();
@@ -79,12 +88,16 @@ public class ServiceConfig {
                     LiveConfig.createDefaultServiceConfiguration(interceptors),
                     LiveConfig.getUnidentifiedSenderTrustRoot(),
                     LiveConfig.createKeyBackupConfig(),
-                    LiveConfig.getCdsMrenclave());
+                    LiveConfig.createFallbackKeyBackupConfigs(),
+                    LiveConfig.getCdsMrenclave(),
+                    LiveConfig.getCdsiMrenclave());
             case STAGING -> new ServiceEnvironmentConfig(serviceEnvironment,
                     StagingConfig.createDefaultServiceConfiguration(interceptors),
                     StagingConfig.getUnidentifiedSenderTrustRoot(),
                     StagingConfig.createKeyBackupConfig(),
-                    StagingConfig.getCdsMrenclave());
+                    StagingConfig.createFallbackKeyBackupConfigs(),
+                    StagingConfig.getCdsMrenclave(),
+                    StagingConfig.getCdsiMrenclave());
         };
     }
 }

@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2022-10-05
+
+### Fixed
+- Fix sending group messages
+- Fix store migration issue on Windows
+- Fix building fat jars
+
+## [0.11.0] - 2022-10-02
+**Attention**: Now requires native libsignal-client version 0.20.0
+
+### Breaking changes
+- Changed meaning of `-v` flag from `--version` to `--verbose`.
+  So now extended logging can be achieved with `-vv`.
+- Remove deprecated fallback to reading from stdin if no message body is given.
+  To read a message from stdin, use the `--message-from-stdin` flag.
+
+### Added
+- Migrate PIN to new KBS enclave when Signal updates it
+- Add `--scrub-log` flag to remove possibly sensitive information from the log
+- Add `sendPaymentNotification` dbus method
+
+### Fixed
+- Fix an issue where messages were sent without sender phone number
+
+### Changed
+- Store data except base account data in sqlite database
+- Use new CDSI for contact discovery in compat mode
+
+## [0.10.11] - 2022-08-17
+**Attention**: Now requires native libsignal-client version 0.19.3
+
+### Added
+- Output content of received story messages
+
+## [0.10.10] - 2022-07-30
+**Attention**: Now requires native libsignal-client version 0.18.1
+
+### Fixed
+- Fix setPin/removePin commands which broke due to server side changes
+- Workaround GraalVM 22.2.0 issue with daemon connection
+
+## [0.10.9] - 2022-07-16
+
+### Changed
+- updateAccount command checks self number and PNI after updating account attributes
+
+### Fixed
+- Fixed small issue with syncing contacts from storage
+- Fixed issue with opening older account files
+
 ## [0.10.8] - 2022-06-13
 
 ### Added
