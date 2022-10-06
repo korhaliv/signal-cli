@@ -32,7 +32,6 @@ import org.asamk.signal.manager.api.RecipientIdentifier;
 import org.asamk.signal.manager.api.SendGroupMessageResults;
 import org.asamk.signal.manager.api.SendMessageResult;
 import org.asamk.signal.manager.api.SendMessageResults;
-import org.asamk.signal.manager.api.StickerPack;
 import org.asamk.signal.manager.api.StickerPackId;
 import org.asamk.signal.manager.api.StickerPackInvalidException;
 import org.asamk.signal.manager.api.StickerPackUrl;
@@ -58,7 +57,7 @@ import org.asamk.signal.manager.storage.recipients.Recipient;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
 import org.asamk.signal.manager.storage.stickerPacks.JsonStickerPack;
 import org.asamk.signal.manager.storage.stickerPacks.StickerPackStore;
-import org.asamk.signal.manager.storage.stickers.Sticker;
+import org.asamk.signal.manager.storage.stickers.StickerPack;
 import org.asamk.signal.manager.util.AttachmentUtils;
 import org.asamk.signal.manager.util.KeyUtils;
 import org.asamk.signal.manager.util.StickerUtils;
@@ -70,6 +69,7 @@ import org.whispersystems.signalservice.api.messages.SignalServicePreview;
 import org.whispersystems.signalservice.api.messages.SignalServiceReceiptMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceTypingMessage;
 import org.whispersystems.signalservice.api.push.ACI;
+import org.whispersystems.signalservice.api.push.ServiceId;
 import org.whispersystems.signalservice.api.util.DeviceNameUtil;
 import org.whispersystems.signalservice.api.util.InvalidNumberException;
 import org.whispersystems.signalservice.api.util.PhoneNumberFormatter;
@@ -166,10 +166,12 @@ class ManagerImpl implements Manager {
                 this.notifyAll();
             }
         });
-        disposable.add(account.getIdentityKeyStore().getIdentityChanges().subscribe(recipientId -> {
-            logger.trace("Archiving old sessions for {}", recipientId);
-            account.getSessionStore().archiveSessions(recipientId);
-            account.getSenderKeyStore().deleteSharedWith(recipientId);
+        disposable.add(account.getIdentityKeyStore().getIdentityChanges().subscribe(serviceId -> {
+            logger.trace("Archiving old sessions for {}", serviceId);
+            account.getAciSessionStore().archiveSessions(serviceId);
+            account.getPniSessionStore().archiveSessions(serviceId);
+            account.getSenderKeyStore().deleteSharedWith(serviceId);
+            final var recipientId = account.getRecipientResolver().resolveRecipient(serviceId);
             final var profile = account.getProfileStore().getProfile(recipientId);
             if (profile != null) {
                 account.getProfileStore()
@@ -231,8 +233,8 @@ class ManagerImpl implements Manager {
         if (deviceName != null) {
             context.getAccountHelper().setDeviceName(deviceName);
         }
-        context.getAccountHelper().checkWhoAmiI();
         context.getAccountHelper().updateAccountAttributes();
+        context.getAccountHelper().checkWhoAmiI();
     }
 
     @Override
@@ -564,7 +566,8 @@ class ManagerImpl implements Manager {
             final var quote = message.quote().get();
             messageBuilder.withQuote(new SignalServiceDataMessage.Quote(quote.timestamp(),
                     context.getRecipientHelper()
-                            .resolveSignalServiceAddress(context.getRecipientHelper().resolveRecipient(quote.author())),
+                            .resolveSignalServiceAddress(context.getRecipientHelper().resolveRecipient(quote.author()))
+                            .getServiceId(),
                     quote.message(),
                     List.of(),
                     resolveMentions(quote.mentions()),
@@ -579,7 +582,7 @@ class ManagerImpl implements Manager {
             if (stickerPack == null) {
                 throw new InvalidStickerException("Sticker pack not found");
             }
-            final var manifest = context.getStickerHelper().getOrRetrieveStickerPack(packId, stickerPack.getPackKey());
+            final var manifest = context.getStickerHelper().getOrRetrieveStickerPack(packId, stickerPack.packKey());
             if (manifest.stickers().size() <= stickerId) {
                 throw new InvalidStickerException("Sticker id not part of this pack");
             }
@@ -589,7 +592,7 @@ class ManagerImpl implements Manager {
                 throw new InvalidStickerException("Missing local sticker file");
             }
             messageBuilder.withSticker(new SignalServiceDataMessage.Sticker(packId.serialize(),
-                    stickerPack.getPackKey(),
+                    stickerPack.packKey(),
                     stickerId,
                     manifestSticker.emoji(),
                     AttachmentUtils.createAttachmentStream(streamDetails, Optional.empty())));
@@ -630,7 +633,11 @@ class ManagerImpl implements Manager {
             if (recipient instanceof RecipientIdentifier.Single r) {
                 try {
                     final var recipientId = context.getRecipientHelper().resolveRecipient(r);
-                    account.getMessageSendLogStore().deleteEntryForRecipientNonGroup(targetSentTimestamp, recipientId);
+                    account.getMessageSendLogStore()
+                            .deleteEntryForRecipientNonGroup(targetSentTimestamp,
+                                    account.getRecipientAddressResolver()
+                                            .resolveRecipientAddress(recipientId)
+                                            .getServiceId());
                 } catch (UnregisteredRecipientException ignored) {
                 }
             } else if (recipient instanceof RecipientIdentifier.Group r) {
@@ -651,7 +658,7 @@ class ManagerImpl implements Manager {
         var targetAuthorRecipientId = context.getRecipientHelper().resolveRecipient(targetAuthor);
         var reaction = new SignalServiceDataMessage.Reaction(emoji,
                 remove,
-                context.getRecipientHelper().resolveSignalServiceAddress(targetAuthorRecipientId),
+                context.getRecipientHelper().resolveSignalServiceAddress(targetAuthorRecipientId).getServiceId(),
                 targetSentTimestamp);
         final var messageBuilder = SignalServiceDataMessage.newBuilder().withReaction(reaction);
         return sendMessage(messageBuilder, recipients);
@@ -688,7 +695,11 @@ class ManagerImpl implements Manager {
                 } catch (UnregisteredRecipientException e) {
                     continue;
                 }
-                account.getSessionStore().deleteAllSessions(recipientId);
+                final var serviceId = context.getAccount()
+                        .getRecipientAddressResolver()
+                        .resolveRecipientAddress(recipientId)
+                        .getServiceId();
+                account.getAciSessionStore().deleteAllSessions(serviceId);
             }
         }
     }
@@ -795,21 +806,21 @@ class ManagerImpl implements Manager {
         var packIdString = messageSender.uploadStickerManifest(manifest, packKey);
         var packId = StickerPackId.deserialize(Hex.fromStringCondensed(packIdString));
 
-        var sticker = new Sticker(packId, packKey);
-        account.getStickerStore().updateSticker(sticker);
+        var sticker = new StickerPack(packId, packKey);
+        account.getStickerStore().addStickerPack(sticker);
 
         return new StickerPackUrl(packId, packKey);
     }
 
     @Override
-    public List<StickerPack> getStickerPacks() {
+    public List<org.asamk.signal.manager.api.StickerPack> getStickerPacks() {
         final var stickerPackStore = context.getStickerPackStore();
         return account.getStickerStore().getStickerPacks().stream().map(pack -> {
-            if (stickerPackStore.existsStickerPack(pack.getPackId())) {
+            if (stickerPackStore.existsStickerPack(pack.packId())) {
                 try {
-                    final var manifest = stickerPackStore.retrieveManifest(pack.getPackId());
-                    return new StickerPack(pack.getPackId(),
-                            new StickerPackUrl(pack.getPackId(), pack.getPackKey()),
+                    final var manifest = stickerPackStore.retrieveManifest(pack.packId());
+                    return new org.asamk.signal.manager.api.StickerPack(pack.packId(),
+                            new StickerPackUrl(pack.packId(), pack.packKey()),
                             pack.isInstalled(),
                             manifest.title(),
                             manifest.author(),
@@ -820,7 +831,7 @@ class ManagerImpl implements Manager {
                 }
             }
 
-            return new StickerPack(pack.getPackId(), pack.getPackKey(), pack.isInstalled());
+            return new org.asamk.signal.manager.api.StickerPack(pack.packId(), pack.packKey(), pack.isInstalled());
         }).toList();
     }
 
@@ -1034,27 +1045,29 @@ class ManagerImpl implements Manager {
         }
 
         final var address = account.getRecipientAddressResolver()
-                .resolveRecipientAddress(identityInfo.getRecipientId());
+                .resolveRecipientAddress(account.getRecipientResolver().resolveRecipient(identityInfo.getServiceId()));
         final var scannableFingerprint = context.getIdentityHelper()
-                .computeSafetyNumberForScanning(identityInfo.getRecipientId(), identityInfo.getIdentityKey());
+                .computeSafetyNumberForScanning(identityInfo.getServiceId(), identityInfo.getIdentityKey());
         return new Identity(address,
                 identityInfo.getIdentityKey(),
                 context.getIdentityHelper()
-                        .computeSafetyNumber(identityInfo.getRecipientId(), identityInfo.getIdentityKey()),
+                        .computeSafetyNumber(identityInfo.getServiceId(), identityInfo.getIdentityKey()),
                 scannableFingerprint == null ? null : scannableFingerprint.getSerialized(),
                 identityInfo.getTrustLevel(),
-                identityInfo.getDateAdded());
+                identityInfo.getDateAddedTimestamp());
     }
 
     @Override
     public List<Identity> getIdentities(RecipientIdentifier.Single recipient) {
-        IdentityInfo identity;
+        ServiceId serviceId;
         try {
-            identity = account.getIdentityKeyStore()
-                    .getIdentityInfo(context.getRecipientHelper().resolveRecipient(recipient));
+            serviceId = account.getRecipientAddressResolver()
+                    .resolveRecipientAddress(context.getRecipientHelper().resolveRecipient(recipient))
+                    .getServiceId();
         } catch (UnregisteredRecipientException e) {
-            identity = null;
+            return List.of();
         }
+        final var identity = account.getIdentityKeyStore().getIdentityInfo(serviceId);
         return identity == null ? List.of() : List.of(toIdentity(identity));
     }
 

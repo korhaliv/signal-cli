@@ -16,8 +16,8 @@ import org.asamk.signal.manager.util.ProfileUtils;
 import org.asamk.signal.manager.util.Utils;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.InvalidKeyException;
+import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredential;
 import org.signal.libsignal.zkgroup.profiles.ProfileKey;
-import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredential;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.signalservice.api.crypto.UnidentifiedAccess;
@@ -28,6 +28,7 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 import org.whispersystems.signalservice.api.push.exceptions.NotFoundException;
 import org.whispersystems.signalservice.api.push.exceptions.PushNetworkException;
 import org.whispersystems.signalservice.api.services.ProfileService;
+import org.whispersystems.signalservice.api.util.ExpiringProfileCredentialUtil;
 
 import java.io.File;
 import java.io.IOException;
@@ -106,24 +107,20 @@ public final class ProfileHelper {
         getRecipientProfiles(recipientIds, true);
     }
 
-    public List<ProfileKeyCredential> getRecipientProfileKeyCredential(List<RecipientId> recipientIds) {
-        try {
-            account.getRecipientStore().setBulkUpdating(true);
-            final var profileFetches = Flowable.fromIterable(recipientIds)
-                    .filter(recipientId -> account.getProfileStore().getProfileKeyCredential(recipientId) == null)
-                    .map(recipientId -> retrieveProfile(recipientId,
-                            SignalServiceProfile.RequestType.PROFILE_AND_CREDENTIAL).onErrorComplete());
-            Maybe.merge(profileFetches, 10).blockingSubscribe();
-        } finally {
-            account.getRecipientStore().setBulkUpdating(false);
-        }
+    public List<ExpiringProfileKeyCredential> getExpiringProfileKeyCredential(List<RecipientId> recipientIds) {
+        final var profileFetches = Flowable.fromIterable(recipientIds)
+                .filter(recipientId -> !ExpiringProfileCredentialUtil.isValid(account.getProfileStore()
+                        .getExpiringProfileKeyCredential(recipientId)))
+                .map(recipientId -> retrieveProfile(recipientId,
+                        SignalServiceProfile.RequestType.PROFILE_AND_CREDENTIAL).onErrorComplete());
+        Maybe.merge(profileFetches, 10).blockingSubscribe();
 
-        return recipientIds.stream().map(r -> account.getProfileStore().getProfileKeyCredential(r)).toList();
+        return recipientIds.stream().map(r -> account.getProfileStore().getExpiringProfileKeyCredential(r)).toList();
     }
 
-    public ProfileKeyCredential getRecipientProfileKeyCredential(RecipientId recipientId) {
-        var profileKeyCredential = account.getProfileStore().getProfileKeyCredential(recipientId);
-        if (profileKeyCredential != null) {
+    public ExpiringProfileKeyCredential getExpiringProfileKeyCredential(RecipientId recipientId) {
+        var profileKeyCredential = account.getProfileStore().getExpiringProfileKeyCredential(recipientId);
+        if (ExpiringProfileCredentialUtil.isValid(profileKeyCredential)) {
             return profileKeyCredential;
         }
 
@@ -134,7 +131,7 @@ public final class ProfileHelper {
             return null;
         }
 
-        return account.getProfileStore().getProfileKeyCredential(recipientId);
+        return account.getProfileStore().getExpiringProfileKeyCredential(recipientId);
     }
 
     /**
@@ -231,16 +228,11 @@ public final class ProfileHelper {
 
     private List<Profile> getRecipientProfiles(Collection<RecipientId> recipientIds, boolean force) {
         final var profileStore = account.getProfileStore();
-        try {
-            account.getRecipientStore().setBulkUpdating(true);
-            final var profileFetches = Flowable.fromIterable(recipientIds)
-                    .filter(recipientId -> force || isProfileRefreshRequired(profileStore.getProfile(recipientId)))
-                    .map(recipientId -> retrieveProfile(recipientId,
-                            SignalServiceProfile.RequestType.PROFILE).onErrorComplete());
-            Maybe.merge(profileFetches, 10).blockingSubscribe();
-        } finally {
-            account.getRecipientStore().setBulkUpdating(false);
-        }
+        final var profileFetches = Flowable.fromIterable(recipientIds)
+                .filter(recipientId -> force || isProfileRefreshRequired(profileStore.getProfile(recipientId)))
+                .map(recipientId -> retrieveProfile(recipientId,
+                        SignalServiceProfile.RequestType.PROFILE).onErrorComplete());
+        Maybe.merge(profileFetches, 10).blockingSubscribe();
 
         return recipientIds.stream().map(profileStore::getProfile).toList();
     }
@@ -268,11 +260,6 @@ public final class ProfileHelper {
         // Profiles are cached for 6h before retrieving them again, unless forced
         final var now = System.currentTimeMillis();
         return now - profile.getLastUpdateTimestamp() >= 6 * 60 * 60 * 1000;
-    }
-
-    private SignalServiceProfile retrieveProfileSync(String username) throws IOException {
-        final var locale = Utils.getDefaultLocale(Locale.US);
-        return dependencies.getMessageReceiver().retrieveProfileByUsername(username, Optional.empty(), locale);
     }
 
     private Profile decryptProfileAndDownloadAvatar(
@@ -327,10 +314,11 @@ public final class ProfileHelper {
             final var encryptedProfile = p.getProfile();
 
             if (requestType == SignalServiceProfile.RequestType.PROFILE_AND_CREDENTIAL
-                    || account.getProfileStore().getProfileKeyCredential(recipientId) == null) {
+                    || !ExpiringProfileCredentialUtil.isValid(account.getProfileStore()
+                    .getExpiringProfileKeyCredential(recipientId))) {
                 logger.trace("Storing profile credential");
-                final var profileKeyCredential = p.getProfileKeyCredential().orElse(null);
-                account.getProfileStore().storeProfileKeyCredential(recipientId, profileKeyCredential);
+                final var profileKeyCredential = p.getExpiringProfileKeyCredential().orElse(null);
+                account.getProfileStore().storeExpiringProfileKeyCredential(recipientId, profileKeyCredential);
             }
 
             final var profile = account.getProfileStore().getProfile(recipientId);
@@ -353,7 +341,7 @@ public final class ProfileHelper {
             try {
                 logger.trace("Storing identity");
                 final var identityKey = new IdentityKey(Base64.getDecoder().decode(encryptedProfile.getIdentityKey()));
-                account.getIdentityKeyStore().saveIdentity(recipientId, identityKey);
+                account.getIdentityKeyStore().saveIdentity(p.getProfile().getServiceId(), identityKey);
             } catch (InvalidKeyException ignored) {
                 logger.warn("Got invalid identity key in profile for {}",
                         context.getRecipientHelper().resolveSignalServiceAddress(recipientId).getIdentifier());

@@ -120,13 +120,15 @@ public class SendCommand implements JsonRpcLocalCommand {
 
         var messageText = ns.getString("message");
         final var readMessageFromStdin = ns.getBoolean("message-from-stdin") == Boolean.TRUE;
-        if (readMessageFromStdin || (messageText == null && sticker == null)) {
+        if (readMessageFromStdin) {
             logger.debug("Reading message from stdin...");
             try {
                 messageText = IOUtils.readAll(System.in, IOUtils.getConsoleCharset());
             } catch (IOException e) {
                 throw new UserErrorException("Failed to read message from stdin: " + e.getMessage());
             }
+        } else if (messageText == null) {
+            messageText = "";
         }
 
         List<String> attachments = ns.getList("attachment");
@@ -168,8 +170,13 @@ public class SendCommand implements JsonRpcLocalCommand {
             previews = List.of();
         }
 
+        if (messageText.isEmpty() && attachments.isEmpty() && sticker == null && quote == null) {
+            throw new UserErrorException(
+                    "Sending empty message is not allowed, either a message, attachment or sticker must be given.");
+        }
+
         try {
-            var results = m.sendMessage(new Message(messageText == null ? "" : messageText,
+            var results = m.sendMessage(new Message(messageText,
                     attachments,
                     mentions,
                     Optional.ofNullable(quote),

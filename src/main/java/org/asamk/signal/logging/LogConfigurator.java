@@ -1,4 +1,4 @@
-package org.asamk.signal;
+package org.asamk.signal.logging;
 
 import java.io.File;
 
@@ -20,6 +20,7 @@ public class LogConfigurator extends ContextAwareBase implements Configurator {
 
     private static int verboseLevel = 0;
     private static File logFile = null;
+    private static boolean scrubSensitiveInformation = false;
 
     public static void setVerboseLevel(int verboseLevel) {
         LogConfigurator.verboseLevel = verboseLevel;
@@ -29,7 +30,11 @@ public class LogConfigurator extends ContextAwareBase implements Configurator {
         LogConfigurator.logFile = logFile;
     }
 
-    public void configure(LoggerContext lc) {
+    public static void setScrubSensitiveInformation(final boolean scrubSensitiveInformation) {
+        LogConfigurator.scrubSensitiveInformation = scrubSensitiveInformation;
+    }
+
+    public ExecutionStatus configure(LoggerContext lc) {
         final var rootLogger = lc.getLogger(Logger.ROOT_LOGGER_NAME);
 
         final var defaultLevel = verboseLevel > 1 ? Level.ALL : verboseLevel > 0 ? Level.DEBUG : Level.INFO;
@@ -63,6 +68,7 @@ public class LogConfigurator extends ContextAwareBase implements Configurator {
             final var fileAppender = createLoggingFileAppender(lc, createLayoutWrappingEncoder(fileLayout));
             rootLogger.addAppender(fileAppender);
         }
+        return ExecutionStatus.DO_NOT_INVOKE_NEXT_IF_ANY;
     }
 
     private ConsoleAppender<ILoggingEvent> createLoggingConsoleAppender(
@@ -97,18 +103,26 @@ public class LogConfigurator extends ContextAwareBase implements Configurator {
     }
 
     private PatternLayout createSimpleLoggingLayout(final LoggerContext lc) {
-        return new PatternLayout() {{
-            setPattern("%-5level %logger{0} - %msg%n");
-            setContext(lc);
-            start();
-        }};
+        final var patternLayout = getPatternLayout();
+        patternLayout.setPattern("%-5level %logger{0} - %msg%n");
+        patternLayout.setContext(lc);
+        patternLayout.start();
+        return patternLayout;
     }
 
     private PatternLayout createDetailedLoggingLayout(final LoggerContext lc) {
-        return new PatternLayout() {{
-            setPattern("%d{yyyy-MM-dd'T'HH:mm:ss.SSSXX} [%thread] %-5level %logger{36} - %msg%n");
-            setContext(lc);
-            start();
-        }};
+        final var patternLayout = getPatternLayout();
+        patternLayout.setPattern("%d{yyyy-MM-dd'T'HH:mm:ss.SSSXX} [%thread] %-5level %logger{36} - %msg%n");
+        patternLayout.setContext(lc);
+        patternLayout.start();
+        return patternLayout;
+    }
+
+    private PatternLayout getPatternLayout() {
+        if (scrubSensitiveInformation) {
+            return new ScrubberPatternLayout();
+        } else {
+            return new PatternLayout();
+        }
     }
 }

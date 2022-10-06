@@ -34,7 +34,7 @@ import org.asamk.signal.manager.storage.SignalAccount;
 import org.asamk.signal.manager.storage.groups.GroupInfoV1;
 import org.asamk.signal.manager.storage.recipients.Profile;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
-import org.asamk.signal.manager.storage.stickers.Sticker;
+import org.asamk.signal.manager.storage.stickers.StickerPack;
 import org.asamk.signal.manager.util.KeyUtils;
 import org.signal.libsignal.metadata.ProtocolInvalidKeyException;
 import org.signal.libsignal.metadata.ProtocolInvalidKeyIdException;
@@ -42,7 +42,6 @@ import org.signal.libsignal.metadata.ProtocolInvalidMessageException;
 import org.signal.libsignal.metadata.ProtocolNoSessionException;
 import org.signal.libsignal.metadata.ProtocolUntrustedIdentityException;
 import org.signal.libsignal.metadata.SelfSendException;
-import org.signal.libsignal.protocol.SignalProtocolAddress;
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.profiles.ProfileKey;
@@ -52,9 +51,12 @@ import org.whispersystems.signalservice.api.messages.SignalServiceContent;
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceEnvelope;
 import org.whispersystems.signalservice.api.messages.SignalServiceGroup;
+import org.whispersystems.signalservice.api.messages.SignalServiceGroupV2;
 import org.whispersystems.signalservice.api.messages.SignalServiceReceiptMessage;
+import org.whispersystems.signalservice.api.messages.SignalServiceStoryMessage;
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage;
 import org.whispersystems.signalservice.api.messages.multidevice.StickerPackOperationMessage;
+import org.whispersystems.signalservice.api.push.ServiceId;
 import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 
 import java.util.ArrayList;
@@ -135,16 +137,17 @@ public final class IncomingMessageHandler {
                 } else {
                     final var senderProfile = context.getProfileHelper().getRecipientProfile(sender);
                     final var selfProfile = context.getProfileHelper().getSelfProfile();
+                    final var serviceId = ServiceId.parseOrThrow(e.getSender());
                     if ((!sender.equals(account.getSelfRecipientId()) || e.getSenderDevice() != account.getDeviceId())
                             && senderProfile != null
                             && senderProfile.getCapabilities().contains(Profile.Capability.senderKey)
                             && selfProfile != null
                             && selfProfile.getCapabilities().contains(Profile.Capability.senderKey)) {
                         logger.debug("Received invalid message, requesting message resend.");
-                        actions.add(new SendRetryMessageRequestAction(sender, e, envelope));
+                        actions.add(new SendRetryMessageRequestAction(sender, serviceId, e, envelope));
                     } else {
                         logger.debug("Received invalid message, queuing renew session action.");
-                        actions.add(new RenewSessionAction(sender));
+                        actions.add(new RenewSessionAction(sender, serviceId));
                     }
                 }
                 exception = e;
@@ -168,15 +171,15 @@ public final class IncomingMessageHandler {
             final Manager.ReceiveMessageHandler handler,
             final Exception exception
     ) {
-        if (!envelope.hasSourceUuid() && content != null) {
+        if (content != null) {
             // Store uuid if we don't have it already
             // address/uuid is validated by unidentified sender certificate
             account.getRecipientTrustedResolver().resolveRecipientTrusted(content.getSender());
         }
         if (envelope.isReceipt()) {
-            final var senderPair = getSender(envelope, content);
-            final var sender = senderPair.first();
-            final var senderDeviceId = senderPair.second();
+            final var senderDeviceAddress = getSender(envelope, content);
+            final var sender = senderDeviceAddress.serviceId();
+            final var senderDeviceId = senderDeviceAddress.deviceId();
             account.getMessageSendLogStore().deleteEntryForRecipient(envelope.getTimestamp(), sender, senderDeviceId);
         }
 
@@ -209,23 +212,23 @@ public final class IncomingMessageHandler {
             SignalServiceEnvelope envelope, SignalServiceContent content, ReceiveConfig receiveConfig
     ) {
         var actions = new ArrayList<HandleAction>();
-        final var senderPair = getSender(envelope, content);
-        final var sender = senderPair.first();
-        final var senderDeviceId = senderPair.second();
+        final var senderDeviceAddress = getSender(envelope, content);
+        final var sender = senderDeviceAddress.recipientId();
+        final var senderServiceId = senderDeviceAddress.serviceId();
+        final var senderDeviceId = senderDeviceAddress.deviceId();
+        final var destination = getDestination(envelope);
 
         if (content.getReceiptMessage().isPresent()) {
             final var message = content.getReceiptMessage().get();
             if (message.isDeliveryReceipt()) {
                 account.getMessageSendLogStore()
-                        .deleteEntriesForRecipient(message.getTimestamps(), sender, senderDeviceId);
+                        .deleteEntriesForRecipient(message.getTimestamps(), senderServiceId, senderDeviceId);
             }
         }
 
         if (content.getSenderKeyDistributionMessage().isPresent()) {
             final var message = content.getSenderKeyDistributionMessage().get();
-            final var protocolAddress = new SignalProtocolAddress(context.getRecipientHelper()
-                    .resolveSignalServiceAddress(sender)
-                    .getIdentifier(), senderDeviceId);
+            final var protocolAddress = senderServiceId.toProtocolAddress(senderDeviceId);
             logger.debug("Received a sender key distribution message for distributionId {} from {}",
                     message.getDistributionId(),
                     protocolAddress);
@@ -239,7 +242,7 @@ public final class IncomingMessageHandler {
                     senderDeviceId,
                     message.getTimestamp());
             if (message.getDeviceId() == account.getDeviceId()) {
-                handleDecryptionErrorMessage(actions, sender, senderDeviceId, message);
+                handleDecryptionErrorMessage(actions, sender, senderServiceId, senderDeviceId, message);
             } else {
                 logger.debug("Request is for another one of our devices");
             }
@@ -271,14 +274,19 @@ public final class IncomingMessageHandler {
 
             actions.addAll(handleSignalServiceDataMessage(message,
                     false,
-                    sender,
-                    account.getSelfRecipientId(),
+                    senderDeviceAddress,
+                    destination,
                     receiveConfig.ignoreAttachments()));
+        }
+
+        if (content.getStoryMessage().isPresent()) {
+            final var message = content.getStoryMessage().get();
+            actions.addAll(handleSignalServiceStoryMessage(message, sender, receiveConfig.ignoreAttachments()));
         }
 
         if (content.getSyncMessage().isPresent()) {
             var syncMessage = content.getSyncMessage().get();
-            actions.addAll(handleSyncMessage(syncMessage, sender, receiveConfig.ignoreAttachments()));
+            actions.addAll(handleSyncMessage(syncMessage, senderDeviceAddress, receiveConfig.ignoreAttachments()));
         }
 
         return actions;
@@ -287,24 +295,29 @@ public final class IncomingMessageHandler {
     private void handleDecryptionErrorMessage(
             final List<HandleAction> actions,
             final RecipientId sender,
+            final ServiceId senderServiceId,
             final int senderDeviceId,
             final DecryptionErrorMessage message
     ) {
         final var logEntries = account.getMessageSendLogStore()
-                .findMessages(sender, senderDeviceId, message.getTimestamp(), message.getRatchetKey().isEmpty());
+                .findMessages(senderServiceId,
+                        senderDeviceId,
+                        message.getTimestamp(),
+                        message.getRatchetKey().isEmpty());
 
         for (final var logEntry : logEntries) {
             actions.add(new ResendMessageAction(sender, message.getTimestamp(), logEntry));
         }
 
         if (message.getRatchetKey().isPresent()) {
-            if (account.getSessionStore().isCurrentRatchetKey(sender, senderDeviceId, message.getRatchetKey().get())) {
+            if (account.getAciSessionStore()
+                    .isCurrentRatchetKey(senderServiceId, senderDeviceId, message.getRatchetKey().get())) {
                 if (logEntries.isEmpty()) {
                     logger.debug("Renewing the session with sender");
-                    actions.add(new RenewSessionAction(sender));
+                    actions.add(new RenewSessionAction(sender, senderServiceId));
                 } else {
                     logger.trace("Archiving the session with sender, a resend message has already been queued");
-                    context.getAccount().getSessionStore().archiveSessions(sender);
+                    context.getAccount().getAciSessionStore().archiveSessions(senderServiceId);
                 }
             }
             return;
@@ -324,16 +337,16 @@ public final class IncomingMessageHandler {
                     sender,
                     senderDeviceId,
                     group.getDistributionId());
-            account.getSenderKeyStore().deleteSharedWith(sender, senderDeviceId, group.getDistributionId());
+            account.getSenderKeyStore().deleteSharedWith(senderServiceId, senderDeviceId, group.getDistributionId());
         }
         if (!found) {
             logger.debug("Reset all shared sender keys with this recipient, no related message found in send log");
-            account.getSenderKeyStore().deleteSharedWith(sender);
+            account.getSenderKeyStore().deleteSharedWith(senderServiceId);
         }
     }
 
     private List<HandleAction> handleSyncMessage(
-            final SignalServiceSyncMessage syncMessage, final RecipientId sender, final boolean ignoreAttachments
+            final SignalServiceSyncMessage syncMessage, final DeviceAddress sender, final boolean ignoreAttachments
     ) {
         var actions = new ArrayList<HandleAction>();
         account.setMultiDevice(true);
@@ -344,7 +357,16 @@ public final class IncomingMessageHandler {
                 actions.addAll(handleSignalServiceDataMessage(message.getDataMessage().get(),
                         true,
                         sender,
-                        destination == null ? null : context.getRecipientHelper().resolveRecipient(destination),
+                        destination == null
+                                ? null
+                                : new DeviceAddress(context.getRecipientHelper().resolveRecipient(destination),
+                                        destination.getServiceId(),
+                                        0),
+                        ignoreAttachments));
+            }
+            if (message.getStoryMessage().isPresent()) {
+                actions.addAll(handleSignalServiceStoryMessage(message.getStoryMessage().get(),
+                        sender.recipientId(),
                         ignoreAttachments));
             }
         }
@@ -409,8 +431,7 @@ public final class IncomingMessageHandler {
         if (syncMessage.getVerified().isPresent()) {
             final var verifiedMessage = syncMessage.getVerified().get();
             account.getIdentityKeyStore()
-                    .setIdentityTrustLevel(account.getRecipientTrustedResolver()
-                                    .resolveRecipientTrusted(verifiedMessage.getDestination()),
+                    .setIdentityTrustLevel(verifiedMessage.getDestination().getServiceId(),
                             verifiedMessage.getIdentityKey(),
                             TrustLevel.fromVerifiedState(verifiedMessage.getVerified()));
         }
@@ -427,7 +448,8 @@ public final class IncomingMessageHandler {
                 var sticker = account.getStickerStore().getStickerPack(stickerPackId);
                 if (m.getPackKey().isPresent()) {
                     if (sticker == null) {
-                        sticker = new Sticker(stickerPackId, m.getPackKey().get());
+                        sticker = new StickerPack(-1, stickerPackId, m.getPackKey().get(), installed);
+                        account.getStickerStore().addStickerPack(sticker);
                     }
                     if (installed) {
                         context.getJobExecutor()
@@ -435,9 +457,8 @@ public final class IncomingMessageHandler {
                     }
                 }
 
-                if (sticker != null) {
-                    sticker.setInstalled(installed);
-                    account.getStickerStore().updateSticker(sticker);
+                if (sticker != null && sticker.isInstalled() != installed) {
+                    account.getStickerStore().updateStickerPackInstalled(sticker.packId(), installed);
                 }
             }
         }
@@ -480,6 +501,7 @@ public final class IncomingMessageHandler {
                     pniIdentity.getPrivateKey().toByteArray()));
             actions.add(RefreshPreKeysAction.create());
         }
+        // TODO handle PniChangeNumber
         return actions;
     }
 
@@ -560,14 +582,15 @@ public final class IncomingMessageHandler {
     private List<HandleAction> handleSignalServiceDataMessage(
             SignalServiceDataMessage message,
             boolean isSync,
-            RecipientId source,
-            RecipientId destination,
+            DeviceAddress source,
+            DeviceAddress destination,
             boolean ignoreAttachments
     ) {
         var actions = new ArrayList<HandleAction>();
         if (message.getGroupContext().isPresent()) {
-            if (message.getGroupContext().get().getGroupV1().isPresent()) {
-                var groupInfo = message.getGroupContext().get().getGroupV1().get();
+            final var groupContext = message.getGroupContext().get();
+            if (groupContext.getGroupV1().isPresent()) {
+                var groupInfo = groupContext.getGroupV1().get();
                 var groupId = GroupId.v1(groupInfo.getGroupId());
                 var group = context.getGroupHelper().getGroup(groupId);
                 if (group == null || group instanceof GroupInfoV1) {
@@ -600,19 +623,19 @@ public final class IncomingMessageHandler {
                         }
                         case DELIVER:
                             if (groupV1 == null && !isSync) {
-                                actions.add(new SendGroupInfoRequestAction(source, groupId));
+                                actions.add(new SendGroupInfoRequestAction(source.recipientId(), groupId));
                             }
                             break;
                         case QUIT: {
                             if (groupV1 != null) {
-                                groupV1.removeMember(source);
+                                groupV1.removeMember(source.recipientId());
                                 account.getGroupStore().updateGroup(groupV1);
                             }
                             break;
                         }
                         case REQUEST_INFO:
                             if (groupV1 != null && !isSync) {
-                                actions.add(new SendGroupInfoAction(source, groupV1.getGroupId()));
+                                actions.add(new SendGroupInfoAction(source.recipientId(), groupV1.getGroupId()));
                             }
                             break;
                     }
@@ -620,25 +643,20 @@ public final class IncomingMessageHandler {
                     // Received a group v1 message for a v2 group
                 }
             }
-            if (message.getGroupContext().get().getGroupV2().isPresent()) {
-                final var groupContext = message.getGroupContext().get().getGroupV2().get();
-                final var groupMasterKey = groupContext.getMasterKey();
-
-                context.getGroupHelper()
-                        .getOrMigrateGroup(groupMasterKey,
-                                groupContext.getRevision(),
-                                groupContext.hasSignedGroupChange() ? groupContext.getSignedGroupChange() : null);
+            if (groupContext.getGroupV2().isPresent()) {
+                handleGroupV2Context(groupContext.getGroupV2().get());
             }
         }
 
         final var conversationPartnerAddress = isSync ? destination : source;
         if (conversationPartnerAddress != null && message.isEndSession()) {
-            account.getSessionStore().deleteAllSessions(conversationPartnerAddress);
+            account.getAciSessionStore().deleteAllSessions(conversationPartnerAddress.serviceId());
         }
         if (message.isExpirationUpdate() || message.getBody().isPresent()) {
             if (message.getGroupContext().isPresent()) {
-                if (message.getGroupContext().get().getGroupV1().isPresent()) {
-                    var groupInfo = message.getGroupContext().get().getGroupV1().get();
+                final var groupContext = message.getGroupContext().get();
+                if (groupContext.getGroupV1().isPresent()) {
+                    var groupInfo = groupContext.getGroupV1().get();
                     var group = account.getGroupStore().getOrCreateGroupV1(GroupId.v1(groupInfo.getGroupId()));
                     if (group != null) {
                         if (group.messageExpirationTime != message.getExpiresInSeconds()) {
@@ -646,12 +664,12 @@ public final class IncomingMessageHandler {
                             account.getGroupStore().updateGroup(group);
                         }
                     }
-                } else if (message.getGroupContext().get().getGroupV2().isPresent()) {
+                } else if (groupContext.getGroupV2().isPresent()) {
                     // disappearing message timer already stored in the DecryptedGroup
                 }
             } else if (conversationPartnerAddress != null) {
                 context.getContactHelper()
-                        .setExpirationTimer(conversationPartnerAddress, message.getExpiresInSeconds());
+                        .setExpirationTimer(conversationPartnerAddress.recipientId(), message.getExpiresInSeconds());
             }
         }
         if (!ignoreAttachments) {
@@ -686,38 +704,101 @@ public final class IncomingMessageHandler {
                 }
             }
         }
-        if (message.getProfileKey().isPresent() && message.getProfileKey().get().length == 32) {
-            final ProfileKey profileKey;
-            try {
-                profileKey = new ProfileKey(message.getProfileKey().get());
-            } catch (InvalidInputException e) {
-                throw new AssertionError(e);
-            }
-            if (account.getSelfRecipientId().equals(source)) {
-                this.account.setProfileKey(profileKey);
-            }
-            this.account.getProfileStore().storeProfileKey(source, profileKey);
+        if (message.getProfileKey().isPresent()) {
+            handleIncomingProfileKey(message.getProfileKey().get(), source.recipientId());
         }
         if (message.getSticker().isPresent()) {
             final var messageSticker = message.getSticker().get();
             final var stickerPackId = StickerPackId.deserialize(messageSticker.getPackId());
             var sticker = account.getStickerStore().getStickerPack(stickerPackId);
             if (sticker == null) {
-                sticker = new Sticker(stickerPackId, messageSticker.getPackKey());
-                account.getStickerStore().updateSticker(sticker);
+                sticker = new StickerPack(stickerPackId, messageSticker.getPackKey());
+                account.getStickerStore().addStickerPack(sticker);
             }
             context.getJobExecutor().enqueueJob(new RetrieveStickerPackJob(stickerPackId, messageSticker.getPackKey()));
         }
         return actions;
     }
 
-    private Pair<RecipientId, Integer> getSender(SignalServiceEnvelope envelope, SignalServiceContent content) {
+    private List<HandleAction> handleSignalServiceStoryMessage(
+            SignalServiceStoryMessage message, RecipientId source, boolean ignoreAttachments
+    ) {
+        var actions = new ArrayList<HandleAction>();
+        if (message.getGroupContext().isPresent()) {
+            handleGroupV2Context(message.getGroupContext().get());
+        }
+
+        if (!ignoreAttachments) {
+            if (message.getFileAttachment().isPresent()) {
+                context.getAttachmentHelper().downloadAttachment(message.getFileAttachment().get());
+            }
+            if (message.getTextAttachment().isPresent()) {
+                final var textAttachment = message.getTextAttachment().get();
+                if (textAttachment.getPreview().isPresent()) {
+                    final var preview = textAttachment.getPreview().get();
+                    if (preview.getImage().isPresent()) {
+                        context.getAttachmentHelper().downloadAttachment(preview.getImage().get());
+                    }
+                }
+            }
+        }
+
+        if (message.getProfileKey().isPresent()) {
+            handleIncomingProfileKey(message.getProfileKey().get(), source);
+        }
+
+        return actions;
+    }
+
+    private void handleGroupV2Context(final SignalServiceGroupV2 groupContext) {
+        final var groupMasterKey = groupContext.getMasterKey();
+
+        context.getGroupHelper()
+                .getOrMigrateGroup(groupMasterKey,
+                        groupContext.getRevision(),
+                        groupContext.hasSignedGroupChange() ? groupContext.getSignedGroupChange() : null);
+    }
+
+    private void handleIncomingProfileKey(final byte[] profileKeyBytes, final RecipientId source) {
+        if (profileKeyBytes.length != 32) {
+            logger.debug("Received invalid profile key of length {}", profileKeyBytes.length);
+            return;
+        }
+        final ProfileKey profileKey;
+        try {
+            profileKey = new ProfileKey(profileKeyBytes);
+        } catch (InvalidInputException e) {
+            throw new AssertionError(e);
+        }
+        if (account.getSelfRecipientId().equals(source)) {
+            this.account.setProfileKey(profileKey);
+        }
+        this.account.getProfileStore().storeProfileKey(source, profileKey);
+    }
+
+    private DeviceAddress getSender(SignalServiceEnvelope envelope, SignalServiceContent content) {
         if (!envelope.isUnidentifiedSender() && envelope.hasSourceUuid()) {
-            return new Pair<>(context.getRecipientHelper().resolveRecipient(envelope.getSourceAddress()),
+            return new DeviceAddress(context.getRecipientHelper().resolveRecipient(envelope.getSourceAddress()),
+                    envelope.getSourceAddress().getServiceId(),
                     envelope.getSourceDevice());
         } else {
-            return new Pair<>(context.getRecipientHelper().resolveRecipient(content.getSender()),
+            return new DeviceAddress(context.getRecipientHelper().resolveRecipient(content.getSender()),
+                    content.getSender().getServiceId(),
                     content.getSenderDevice());
         }
     }
+
+    private DeviceAddress getDestination(SignalServiceEnvelope envelope) {
+        if (!envelope.hasDestinationUuid()) {
+            return new DeviceAddress(account.getSelfRecipientId(), account.getAci(), account.getDeviceId());
+        }
+        final var addressOptional = SignalServiceAddress.fromRaw(envelope.getDestinationUuid(), null);
+        if (addressOptional.isEmpty()) {
+            return new DeviceAddress(account.getSelfRecipientId(), account.getAci(), account.getDeviceId());
+        }
+        final var address = addressOptional.get();
+        return new DeviceAddress(context.getRecipientHelper().resolveRecipient(address), address.getServiceId(), 0);
+    }
+
+    private record DeviceAddress(RecipientId recipientId, ServiceId serviceId, int deviceId) {}
 }

@@ -388,7 +388,8 @@ public class DbusManagerImpl implements Manager {
     public SendMessageResults sendPaymentNotificationMessage(
             final byte[] receipt, final String note, final RecipientIdentifier.Single recipient
     ) throws IOException {
-        throw new UnsupportedOperationException();
+        final var timestamp = signal.sendPaymentNotification(receipt, note, recipient.getIdentifier());
+        return new SendMessageResults(timestamp, Map.of());
     }
 
     @Override
@@ -751,6 +752,7 @@ public class DbusManagerImpl implements Manager {
                                         messageReceived.getGroupId()), false, 0))
                                         : Optional.empty(),
                                 Optional.empty(),
+                                Optional.empty(),
                                 Optional.of(messageReceived.getMessage()),
                                 0,
                                 false,
@@ -767,6 +769,7 @@ public class DbusManagerImpl implements Manager {
                                 List.of(),
                                 List.of(),
                                 List.of())),
+                        Optional.empty(),
                         Optional.empty(),
                         Optional.empty());
                 notifyMessageHandlers(envelope);
@@ -790,6 +793,7 @@ public class DbusManagerImpl implements Manager {
                         Optional.of(new MessageEnvelope.Receipt(receiptReceived.getTimestamp(),
                                 type,
                                 List.of(receiptReceived.getTimestamp()))),
+                        Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
@@ -822,6 +826,7 @@ public class DbusManagerImpl implements Manager {
                                                 syncReceived.getGroupId()), false, 0))
                                                 : Optional.empty(),
                                         Optional.empty(),
+                                        Optional.empty(),
                                         Optional.of(syncReceived.getMessage()),
                                         0,
                                         false,
@@ -837,7 +842,8 @@ public class DbusManagerImpl implements Manager {
                                         Optional.empty(),
                                         List.of(),
                                         List.of(),
-                                        List.of())))),
+                                        List.of())),
+                                Optional.empty())),
                                 Optional.empty(),
                                 List.of(),
                                 List.of(),
@@ -845,6 +851,7 @@ public class DbusManagerImpl implements Manager {
                                 Optional.empty(),
                                 Optional.empty(),
                                 Optional.empty())),
+                        Optional.empty(),
                         Optional.empty());
                 notifyMessageHandlers(envelope);
             };
