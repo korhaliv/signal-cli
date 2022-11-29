@@ -10,6 +10,8 @@ import org.asamk.signal.manager.api.InvalidNumberException;
 import org.asamk.signal.manager.api.InvalidStickerException;
 import org.asamk.signal.manager.api.Message;
 import org.asamk.signal.manager.api.NotPrimaryDeviceException;
+import org.asamk.signal.manager.api.PendingAdminApprovalException;
+import org.asamk.signal.manager.api.RecipientAddress;
 import org.asamk.signal.manager.api.RecipientIdentifier;
 import org.asamk.signal.manager.api.SendMessageResult;
 import org.asamk.signal.manager.api.SendMessageResults;
@@ -27,7 +29,6 @@ import org.asamk.signal.manager.groups.GroupPermission;
 import org.asamk.signal.manager.groups.GroupSendingNotAllowedException;
 import org.asamk.signal.manager.groups.LastGroupAdminException;
 import org.asamk.signal.manager.groups.NotAGroupMemberException;
-import org.asamk.signal.manager.storage.recipients.RecipientAddress;
 import org.asamk.signal.util.SendMessageResultUtils;
 import org.freedesktop.dbus.DBusPath;
 import org.freedesktop.dbus.connections.impl.DBusConnection;
@@ -217,7 +218,8 @@ public class DbusSignalImpl implements Signal {
                             List.of(),
                             Optional.empty(),
                             Optional.empty(),
-                            List.of()),
+                            List.of(),
+                            Optional.empty()),
                     getSingleRecipientIdentifiers(recipients, m.getSelfNumber()).stream()
                             .map(RecipientIdentifier.class::cast)
                             .collect(Collectors.toSet()));
@@ -286,7 +288,8 @@ public class DbusSignalImpl implements Signal {
                     targetSentTimestamp,
                     getSingleRecipientIdentifiers(recipients, m.getSelfNumber()).stream()
                             .map(RecipientIdentifier.class::cast)
-                            .collect(Collectors.toSet()));
+                            .collect(Collectors.toSet()),
+                    false);
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (IOException e) {
@@ -384,7 +387,8 @@ public class DbusSignalImpl implements Signal {
                     List.of(),
                     Optional.empty(),
                     Optional.empty(),
-                    List.of()), Set.of(RecipientIdentifier.NoteToSelf.INSTANCE));
+                    List.of(),
+                    Optional.empty()), Set.of(RecipientIdentifier.NoteToSelf.INSTANCE));
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (AttachmentInvalidException e) {
@@ -426,7 +430,8 @@ public class DbusSignalImpl implements Signal {
                     List.of(),
                     Optional.empty(),
                     Optional.empty(),
-                    List.of()), Set.of(getGroupRecipientIdentifier(groupId)));
+                    List.of(),
+                    Optional.empty()), Set.of(getGroupRecipientIdentifier(groupId)));
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (IOException | InvalidStickerException e) {
@@ -484,7 +489,8 @@ public class DbusSignalImpl implements Signal {
                     remove,
                     getSingleRecipientIdentifier(targetAuthor, m.getSelfNumber()),
                     targetSentTimestamp,
-                    Set.of(getGroupRecipientIdentifier(groupId)));
+                    Set.of(getGroupRecipientIdentifier(groupId)),
+                    false);
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (IOException e) {
@@ -612,7 +618,7 @@ public class DbusSignalImpl implements Signal {
             avatar = nullIfEmpty(avatar);
             final var memberIdentifiers = getSingleRecipientIdentifiers(members, m.getSelfNumber());
             if (groupId == null) {
-                final var results = m.createGroup(name, memberIdentifiers, avatar == null ? null : new File(avatar));
+                final var results = m.createGroup(name, memberIdentifiers, avatar);
                 updateGroups();
                 checkGroupSendMessageResults(results.second().timestamp(), results.second().results());
                 return results.first().serialize();
@@ -621,7 +627,7 @@ public class DbusSignalImpl implements Signal {
                         UpdateGroup.newBuilder()
                                 .withName(name)
                                 .withMembers(memberIdentifiers)
-                                .withAvatarFile(avatar == null ? null : new File(avatar))
+                                .withAvatarFile(avatar)
                                 .build());
                 if (results != null) {
                     checkGroupSendMessageResults(results.timestamp(), results.results());
@@ -681,7 +687,7 @@ public class DbusSignalImpl implements Signal {
             about = nullIfEmpty(about);
             aboutEmoji = nullIfEmpty(aboutEmoji);
             avatarPath = nullIfEmpty(avatarPath);
-            File avatarFile = removeAvatar || avatarPath == null ? null : new File(avatarPath);
+            final var avatarFile = removeAvatar || avatarPath == null ? null : avatarPath;
             m.updateProfile(UpdateProfile.newBuilder()
                     .withGivenName(givenName)
                     .withFamilyName(familyName)
@@ -778,6 +784,8 @@ public class DbusSignalImpl implements Signal {
             }
             final var result = m.joinGroup(linkUrl);
             return result.first().serialize();
+        } catch (PendingAdminApprovalException e) {
+            throw new Error.Failure("Pending admin approval: " + e.getMessage());
         } catch (GroupInviteLinkUrl.InvalidGroupLinkException | InactiveGroupLinkException e) {
             throw new Error.Failure("Group link is invalid: " + e.getMessage());
         } catch (GroupInviteLinkUrl.UnknownGroupLinkVersionException e) {
@@ -1262,7 +1270,7 @@ public class DbusSignalImpl implements Signal {
         }
 
         private void setGroupAvatar(final String avatar) {
-            updateGroup(UpdateGroup.newBuilder().withAvatarFile(new File(avatar)).build());
+            updateGroup(UpdateGroup.newBuilder().withAvatarFile(avatar).build());
         }
 
         private void setMessageExpirationTime(final int expirationTime) {

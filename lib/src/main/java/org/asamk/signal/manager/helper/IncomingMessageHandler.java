@@ -42,7 +42,10 @@ import org.signal.libsignal.metadata.ProtocolInvalidMessageException;
 import org.signal.libsignal.metadata.ProtocolNoSessionException;
 import org.signal.libsignal.metadata.ProtocolUntrustedIdentityException;
 import org.signal.libsignal.metadata.SelfSendException;
+import org.signal.libsignal.protocol.IdentityKeyPair;
+import org.signal.libsignal.protocol.InvalidMessageException;
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage;
+import org.signal.libsignal.protocol.state.SignedPreKeyRecord;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.profiles.ProfileKey;
 import org.slf4j.Logger;
@@ -51,16 +54,21 @@ import org.whispersystems.signalservice.api.messages.SignalServiceContent;
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceEnvelope;
 import org.whispersystems.signalservice.api.messages.SignalServiceGroup;
+import org.whispersystems.signalservice.api.messages.SignalServiceGroupContext;
 import org.whispersystems.signalservice.api.messages.SignalServiceGroupV2;
+import org.whispersystems.signalservice.api.messages.SignalServicePniSignatureMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceReceiptMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceStoryMessage;
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage;
 import org.whispersystems.signalservice.api.messages.multidevice.StickerPackOperationMessage;
+import org.whispersystems.signalservice.api.push.ACI;
+import org.whispersystems.signalservice.api.push.PNI;
 import org.whispersystems.signalservice.api.push.ServiceId;
 import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 public final class IncomingMessageHandler {
@@ -95,7 +103,8 @@ public final class IncomingMessageHandler {
             } catch (ProtocolUntrustedIdentityException e) {
                 final var recipientId = account.getRecipientResolver().resolveRecipient(e.getSender());
                 final var exception = new UntrustedIdentityException(account.getRecipientAddressResolver()
-                        .resolveRecipientAddress(recipientId), e.getSenderDevice());
+                        .resolveRecipientAddress(recipientId)
+                        .toApiRecipientAddress(), e.getSenderDevice());
                 return new Pair<>(List.of(), exception);
             } catch (Exception e) {
                 return new Pair<>(List.of(), e);
@@ -127,7 +136,8 @@ public final class IncomingMessageHandler {
                 final var recipientId = account.getRecipientResolver().resolveRecipient(e.getSender());
                 actions.add(new RetrieveProfileAction(recipientId));
                 exception = new UntrustedIdentityException(account.getRecipientAddressResolver()
-                        .resolveRecipientAddress(recipientId), e.getSenderDevice());
+                        .resolveRecipientAddress(recipientId)
+                        .toApiRecipientAddress(), e.getSenderDevice());
             } catch (ProtocolInvalidKeyIdException | ProtocolInvalidKeyException | ProtocolNoSessionException |
                      ProtocolInvalidMessageException e) {
                 logger.debug("Failed to decrypt incoming message", e);
@@ -137,17 +147,30 @@ public final class IncomingMessageHandler {
                 } else {
                     final var senderProfile = context.getProfileHelper().getRecipientProfile(sender);
                     final var selfProfile = context.getProfileHelper().getSelfProfile();
-                    final var serviceId = ServiceId.parseOrThrow(e.getSender());
-                    if ((!sender.equals(account.getSelfRecipientId()) || e.getSenderDevice() != account.getDeviceId())
-                            && senderProfile != null
-                            && senderProfile.getCapabilities().contains(Profile.Capability.senderKey)
-                            && selfProfile != null
-                            && selfProfile.getCapabilities().contains(Profile.Capability.senderKey)) {
-                        logger.debug("Received invalid message, requesting message resend.");
-                        actions.add(new SendRetryMessageRequestAction(sender, serviceId, e, envelope));
+                    var serviceId = ServiceId.parseOrNull(e.getSender());
+                    if (serviceId == null) {
+                        // Workaround for libsignal-client issue #492
+                        serviceId = account.getRecipientAddressResolver()
+                                .resolveRecipientAddress(sender)
+                                .serviceId()
+                                .orElse(null);
+                    }
+                    if (serviceId != null) {
+                        final var isSelf = sender.equals(account.getSelfRecipientId())
+                                && e.getSenderDevice() == account.getDeviceId();
+                        final var isSenderSenderKeyCapable = senderProfile != null && senderProfile.getCapabilities()
+                                .contains(Profile.Capability.senderKey);
+                        final var isSelfSenderKeyCapable = selfProfile != null && selfProfile.getCapabilities()
+                                .contains(Profile.Capability.senderKey);
+                        if (!isSelf && isSenderSenderKeyCapable && isSelfSenderKeyCapable) {
+                            logger.debug("Received invalid message, requesting message resend.");
+                            actions.add(new SendRetryMessageRequestAction(sender, serviceId, e, envelope));
+                        } else {
+                            logger.debug("Received invalid message, queuing renew session action.");
+                            actions.add(new RenewSessionAction(sender, serviceId));
+                        }
                     } else {
-                        logger.debug("Received invalid message, queuing renew session action.");
-                        actions.add(new RenewSessionAction(sender, serviceId));
+                        logger.debug("Received invalid message from invalid sender: {}", e.getSender());
                     }
                 }
                 exception = e;
@@ -174,7 +197,18 @@ public final class IncomingMessageHandler {
         if (content != null) {
             // Store uuid if we don't have it already
             // address/uuid is validated by unidentified sender certificate
-            account.getRecipientTrustedResolver().resolveRecipientTrusted(content.getSender());
+
+            boolean handledPniSignature = false;
+            if (content.getPniSignatureMessage().isPresent()) {
+                final var message = content.getPniSignatureMessage().get();
+                final var senderAddress = getSenderAddress(envelope, content);
+                if (senderAddress != null) {
+                    handledPniSignature = handlePniSignatureMessage(message, senderAddress);
+                }
+            }
+            if (!handledPniSignature) {
+                account.getRecipientTrustedResolver().resolveRecipientTrusted(content.getSender());
+            }
         }
         if (envelope.isReceipt()) {
             final var senderDeviceAddress = getSender(envelope, content);
@@ -183,12 +217,21 @@ public final class IncomingMessageHandler {
             account.getMessageSendLogStore().deleteEntryForRecipient(envelope.getTimestamp(), sender, senderDeviceId);
         }
 
+        var notAllowedToSendToGroup = isNotAllowedToSendToGroup(envelope, content);
+        final var groupContext = getGroupContext(content);
+        if (groupContext != null && groupContext.getGroupV2().isPresent()) {
+            handleGroupV2Context(groupContext.getGroupV2().get());
+        }
+        // Check again in case the user just joined the group
+        notAllowedToSendToGroup = notAllowedToSendToGroup && isNotAllowedToSendToGroup(envelope, content);
+
         if (isMessageBlocked(envelope, content)) {
             logger.info("Ignoring a message from blocked user/group: {}", envelope.getTimestamp());
             return List.of();
-        } else if (isNotAllowedToSendToGroup(envelope, content)) {
+        } else if (notAllowedToSendToGroup) {
+            final var senderAddress = getSenderAddress(envelope, content);
             logger.info("Ignoring a group message from an unauthorized sender (no member or admin): {} {}",
-                    (envelope.hasSourceUuid() ? envelope.getSourceAddress() : content.getSender()).getIdentifier(),
+                    senderAddress == null ? null : senderAddress.getIdentifier(),
                     envelope.getTimestamp());
             return List.of();
         } else {
@@ -286,10 +329,39 @@ public final class IncomingMessageHandler {
 
         if (content.getSyncMessage().isPresent()) {
             var syncMessage = content.getSyncMessage().get();
-            actions.addAll(handleSyncMessage(syncMessage, senderDeviceAddress, receiveConfig.ignoreAttachments()));
+            actions.addAll(handleSyncMessage(envelope,
+                    syncMessage,
+                    senderDeviceAddress,
+                    receiveConfig.ignoreAttachments()));
         }
 
         return actions;
+    }
+
+    private boolean handlePniSignatureMessage(
+            final SignalServicePniSignatureMessage message, final SignalServiceAddress senderAddress
+    ) {
+        final var aci = ACI.from(senderAddress.getServiceId());
+        final var aciIdentity = account.getIdentityKeyStore().getIdentityInfo(aci);
+        final var pni = message.getPni();
+        final var pniIdentity = account.getIdentityKeyStore().getIdentityInfo(pni);
+
+        if (aciIdentity == null || pniIdentity == null || aci.equals(pni)) {
+            return false;
+        }
+
+        final var verified = pniIdentity.getIdentityKey()
+                .verifyAlternateIdentity(aciIdentity.getIdentityKey(), message.getSignature());
+
+        if (!verified) {
+            logger.debug("Invalid PNI signature of ACI {} with PNI {}", aci, pni);
+            return false;
+        }
+
+        logger.debug("Verified association of ACI {} with PNI {}", aci, pni);
+        account.getRecipientTrustedResolver()
+                .resolveRecipientTrusted(Optional.of(aci), Optional.of(pni), senderAddress.getNumber());
+        return true;
     }
 
     private void handleDecryptionErrorMessage(
@@ -346,7 +418,10 @@ public final class IncomingMessageHandler {
     }
 
     private List<HandleAction> handleSyncMessage(
-            final SignalServiceSyncMessage syncMessage, final DeviceAddress sender, final boolean ignoreAttachments
+            final SignalServiceEnvelope envelope,
+            final SignalServiceSyncMessage syncMessage,
+            final DeviceAddress sender,
+            final boolean ignoreAttachments
     ) {
         var actions = new ArrayList<HandleAction>();
         account.setMultiDevice(true);
@@ -501,17 +576,58 @@ public final class IncomingMessageHandler {
                     pniIdentity.getPrivateKey().toByteArray()));
             actions.add(RefreshPreKeysAction.create());
         }
-        // TODO handle PniChangeNumber
+        if (syncMessage.getPniChangeNumber().isPresent()) {
+            final var pniChangeNumber = syncMessage.getPniChangeNumber().get();
+            logger.debug("Received PNI change number sync message, applying.");
+            if (pniChangeNumber.hasIdentityKeyPair()
+                    && pniChangeNumber.hasRegistrationId()
+                    && pniChangeNumber.hasSignedPreKey()
+                    && !envelope.getUpdatedPni().isEmpty()) {
+                logger.debug("New PNI: {}", envelope.getUpdatedPni());
+                try {
+                    final var updatedPni = PNI.parseOrThrow(envelope.getUpdatedPni());
+                    context.getAccountHelper()
+                            .setPni(updatedPni,
+                                    new IdentityKeyPair(pniChangeNumber.getIdentityKeyPair().toByteArray()),
+                                    new SignedPreKeyRecord(pniChangeNumber.getSignedPreKey().toByteArray()),
+                                    pniChangeNumber.getRegistrationId());
+                } catch (Exception e) {
+                    logger.warn("Failed to handle change number message", e);
+                }
+            }
+        }
         return actions;
     }
 
+    private SignalServiceGroupContext getGroupContext(SignalServiceContent content) {
+        if (content == null) {
+            return null;
+        }
+
+        if (content.getDataMessage().isPresent()) {
+            var message = content.getDataMessage().get();
+            if (message.getGroupContext().isPresent()) {
+                return message.getGroupContext().get();
+            }
+        }
+
+        if (content.getStoryMessage().isPresent()) {
+            var message = content.getStoryMessage().get();
+            if (message.getGroupContext().isPresent()) {
+                try {
+                    return SignalServiceGroupContext.create(null, message.getGroupContext().get());
+                } catch (InvalidMessageException e) {
+                    throw new AssertionError(e);
+                }
+            }
+        }
+
+        return null;
+    }
+
     private boolean isMessageBlocked(SignalServiceEnvelope envelope, SignalServiceContent content) {
-        SignalServiceAddress source;
-        if (!envelope.isUnidentifiedSender() && envelope.hasSourceUuid()) {
-            source = envelope.getSourceAddress();
-        } else if (content != null) {
-            source = content.getSender();
-        } else {
+        SignalServiceAddress source = getSenderAddress(envelope, content);
+        if (source == null) {
             return false;
         }
         final var recipientId = context.getRecipientHelper().resolveRecipient(source);
@@ -519,59 +635,53 @@ public final class IncomingMessageHandler {
             return true;
         }
 
-        if (content != null && content.getDataMessage().isPresent()) {
-            var message = content.getDataMessage().get();
-            if (message.getGroupContext().isPresent()) {
-                var groupId = GroupUtils.getGroupId(message.getGroupContext().get());
-                return context.getGroupHelper().isGroupBlocked(groupId);
-            }
+        final var groupContext = getGroupContext(content);
+        if (groupContext != null) {
+            var groupId = GroupUtils.getGroupId(groupContext);
+            return context.getGroupHelper().isGroupBlocked(groupId);
         }
 
         return false;
     }
 
     private boolean isNotAllowedToSendToGroup(SignalServiceEnvelope envelope, SignalServiceContent content) {
-        SignalServiceAddress source;
-        if (!envelope.isUnidentifiedSender() && envelope.hasSourceUuid()) {
-            source = envelope.getSourceAddress();
-        } else if (content != null) {
-            source = content.getSender();
-        } else {
+        SignalServiceAddress source = getSenderAddress(envelope, content);
+        if (source == null) {
             return false;
         }
 
-        if (content == null || content.getDataMessage().isEmpty()) {
+        final var groupContext = getGroupContext(content);
+        if (groupContext == null) {
             return false;
         }
 
-        var message = content.getDataMessage().get();
-        if (message.getGroupContext().isEmpty()) {
-            return false;
-        }
-
-        if (message.getGroupContext().get().getGroupV1().isPresent()) {
-            var groupInfo = message.getGroupContext().get().getGroupV1().get();
+        if (groupContext.getGroupV1().isPresent()) {
+            var groupInfo = groupContext.getGroupV1().get();
             if (groupInfo.getType() == SignalServiceGroup.Type.QUIT) {
                 return false;
             }
         }
 
-        var groupId = GroupUtils.getGroupId(message.getGroupContext().get());
+        var groupId = GroupUtils.getGroupId(groupContext);
         var group = context.getGroupHelper().getGroup(groupId);
         if (group == null) {
             return false;
         }
 
+        final var message = content.getDataMessage().orElse(null);
+
         final var recipientId = context.getRecipientHelper().resolveRecipient(source);
-        if (!group.isMember(recipientId) && !(group.isPendingMember(recipientId) && message.isGroupV2Update())) {
+        if (!group.isMember(recipientId) && !(
+                group.isPendingMember(recipientId) && message != null && message.isGroupV2Update()
+        )) {
             return true;
         }
 
         if (group.isAnnouncementGroup() && !group.isAdmin(recipientId)) {
-            return message.getBody().isPresent()
+            return message == null
+                    || message.getBody().isPresent()
                     || message.getAttachments().isPresent()
-                    || message.getQuote()
-                    .isPresent()
+                    || message.getQuote().isPresent()
                     || message.getPreviews().isPresent()
                     || message.getMentions().isPresent()
                     || message.getSticker().isPresent();
@@ -774,6 +884,16 @@ public final class IncomingMessageHandler {
             this.account.setProfileKey(profileKey);
         }
         this.account.getProfileStore().storeProfileKey(source, profileKey);
+    }
+
+    private SignalServiceAddress getSenderAddress(SignalServiceEnvelope envelope, SignalServiceContent content) {
+        if (!envelope.isUnidentifiedSender() && envelope.hasSourceUuid()) {
+            return envelope.getSourceAddress();
+        } else if (content != null) {
+            return content.getSender();
+        } else {
+            return null;
+        }
     }
 
     private DeviceAddress getSender(SignalServiceEnvelope envelope, SignalServiceContent content) {

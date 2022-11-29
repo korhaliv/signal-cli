@@ -3,11 +3,10 @@ package org.asamk.signal.manager.api;
 import org.asamk.signal.manager.groups.GroupId;
 import org.asamk.signal.manager.groups.GroupUtils;
 import org.asamk.signal.manager.helper.RecipientAddressResolver;
-import org.asamk.signal.manager.storage.recipients.RecipientAddress;
 import org.asamk.signal.manager.storage.recipients.RecipientResolver;
 import org.signal.libsignal.metadata.ProtocolException;
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachment;
-import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentRemoteId;
+import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer;
 import org.whispersystems.signalservice.api.messages.SignalServiceContent;
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceEnvelope;
@@ -184,7 +183,7 @@ public record MessageEnvelope(
                     RecipientAddressResolver addressResolver
             ) {
                 return new StoryContext(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(
-                        storyContext.getAuthorServiceId())), storyContext.getSentTimestamp());
+                        storyContext.getAuthorServiceId())).toApiRecipientAddress(), storyContext.getSentTimestamp());
             }
         }
 
@@ -205,7 +204,8 @@ public record MessageEnvelope(
                     RecipientAddressResolver addressResolver
             ) {
                 return new Reaction(reaction.getTargetSentTimestamp(),
-                        addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(reaction.getTargetAuthor())),
+                        addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(reaction.getTargetAuthor()))
+                                .toApiRecipientAddress(),
                         reaction.getEmoji(),
                         reaction.isRemove());
             }
@@ -226,7 +226,8 @@ public record MessageEnvelope(
                     final AttachmentFileProvider fileProvider
             ) {
                 return new Quote(quote.getId(),
-                        addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(quote.getAuthor())),
+                        addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(quote.getAuthor()))
+                                .toApiRecipientAddress(),
                         Optional.ofNullable(quote.getText()),
                         quote.getMentions() == null
                                 ? List.of()
@@ -255,9 +256,8 @@ public record MessageEnvelope(
                     RecipientResolver recipientResolver,
                     RecipientAddressResolver addressResolver
             ) {
-                return new Mention(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(mention.getServiceId())),
-                        mention.getStart(),
-                        mention.getLength());
+                return new Mention(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(mention.getServiceId()))
+                        .toApiRecipientAddress(), mention.getStart(), mention.getLength());
             }
         }
 
@@ -281,15 +281,16 @@ public record MessageEnvelope(
             static Attachment from(SignalServiceAttachment attachment, AttachmentFileProvider fileProvider) {
                 if (attachment.isPointer()) {
                     final var a = attachment.asPointer();
-                    return new Attachment(Optional.of(a.getRemoteId().toString()),
-                            Optional.of(fileProvider.getFile(a.getRemoteId())),
+                    final var attachmentFile = fileProvider.getFile(a);
+                    return new Attachment(Optional.of(attachmentFile.getName()),
+                            Optional.of(attachmentFile),
                             a.getFileName(),
                             a.getContentType(),
                             a.getUploadTimestamp() == 0 ? Optional.empty() : Optional.of(a.getUploadTimestamp()),
                             a.getSize().map(Integer::longValue),
                             a.getPreview(),
                             Optional.empty(),
-                            a.getCaption(),
+                            a.getCaption().map(c -> c.isEmpty() ? null : c),
                             a.getWidth() == 0 ? Optional.empty() : Optional.of(a.getWidth()),
                             a.getHeight() == 0 ? Optional.empty() : Optional.of(a.getHeight()),
                             a.getVoiceNote(),
@@ -552,10 +553,12 @@ public record MessageEnvelope(
                 return new Sent(sentMessage.getTimestamp(),
                         sentMessage.getExpirationStartTimestamp(),
                         sentMessage.getDestination()
-                                .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d))),
+                                .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d))
+                                        .toApiRecipientAddress()),
                         sentMessage.getRecipients()
                                 .stream()
-                                .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d)))
+                                .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d))
+                                        .toApiRecipientAddress())
                                 .collect(Collectors.toSet()),
                         sentMessage.getDataMessage()
                                 .map(message -> Data.from(message, recipientResolver, addressResolver, fileProvider)),
@@ -572,7 +575,8 @@ public record MessageEnvelope(
             ) {
                 return new Blocked(blockedListMessage.getAddresses()
                         .stream()
-                        .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d)))
+                        .map(d -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(d))
+                                .toApiRecipientAddress())
                         .toList(), blockedListMessage.getGroupIds().stream().map(GroupId::unknownVersion).toList());
             }
         }
@@ -584,8 +588,8 @@ public record MessageEnvelope(
                     RecipientResolver recipientResolver,
                     RecipientAddressResolver addressResolver
             ) {
-                return new Read(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(readMessage.getSender())),
-                        readMessage.getTimestamp());
+                return new Read(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(readMessage.getSender()))
+                        .toApiRecipientAddress(), readMessage.getTimestamp());
             }
         }
 
@@ -596,8 +600,8 @@ public record MessageEnvelope(
                     RecipientResolver recipientResolver,
                     RecipientAddressResolver addressResolver
             ) {
-                return new Viewed(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(readMessage.getSender())),
-                        readMessage.getTimestamp());
+                return new Viewed(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(readMessage.getSender()))
+                        .toApiRecipientAddress(), readMessage.getTimestamp());
             }
         }
 
@@ -609,7 +613,7 @@ public record MessageEnvelope(
                     RecipientAddressResolver addressResolver
             ) {
                 return new ViewOnceOpen(addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(
-                        readMessage.getSender())), readMessage.getTimestamp());
+                        readMessage.getSender())).toApiRecipientAddress(), readMessage.getTimestamp());
             }
         }
 
@@ -637,7 +641,8 @@ public record MessageEnvelope(
                 return new MessageRequestResponse(Type.from(messageRequestResponse.getType()),
                         messageRequestResponse.getGroupId().map(GroupId::unknownVersion),
                         messageRequestResponse.getPerson()
-                                .map(p -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(p))));
+                                .map(p -> addressResolver.resolveRecipientAddress(recipientResolver.resolveRecipient(p))
+                                        .toApiRecipientAddress()));
             }
 
             public enum Type {
@@ -898,7 +903,7 @@ public record MessageEnvelope(
 
         return new MessageEnvelope(source == null
                 ? Optional.empty()
-                : Optional.of(addressResolver.resolveRecipientAddress(source)),
+                : Optional.of(addressResolver.resolveRecipientAddress(source).toApiRecipientAddress()),
                 sourceDevice,
                 envelope.getTimestamp(),
                 envelope.getServerReceivedTimestamp(),
@@ -914,6 +919,6 @@ public record MessageEnvelope(
 
     public interface AttachmentFileProvider {
 
-        File getFile(SignalServiceAttachmentRemoteId attachmentRemoteId);
+        File getFile(SignalServiceAttachmentPointer pointer);
     }
 }

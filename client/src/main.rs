@@ -1,4 +1,4 @@
-use clap::StructOpt;
+use clap::Parser;
 use jsonrpc_client_transports::{RpcError, TypedSubscriptionStream};
 use jsonrpc_core::{futures_util::StreamExt, Value};
 use std::{path::PathBuf, time::Duration};
@@ -127,6 +127,8 @@ async fn main() -> Result<(), anyhow::Error> {
             quote_message,
             quote_mention,
             sticker,
+            story_timestamp,
+            story_author,
         } => {
             client
                 .send(
@@ -143,6 +145,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     quote_message,
                     quote_mention,
                     sticker,
+                    story_timestamp,
+                    story_author,
                 )
                 .await
         }
@@ -164,6 +168,7 @@ async fn main() -> Result<(), anyhow::Error> {
             target_author,
             target_timestamp,
             remove,
+            story,
         } => {
             client
                 .send_reaction(
@@ -175,6 +180,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     target_author,
                     target_timestamp,
                     remove,
+                    story,
                 )
                 .await
         }
