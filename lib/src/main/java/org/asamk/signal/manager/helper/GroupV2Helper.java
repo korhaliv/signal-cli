@@ -12,7 +12,6 @@ import org.asamk.signal.manager.groups.GroupUtils;
 import org.asamk.signal.manager.groups.NotAGroupMemberException;
 import org.asamk.signal.manager.storage.groups.GroupInfoV2;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
-import org.asamk.signal.manager.util.IOUtils;
 import org.asamk.signal.manager.util.Utils;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.VerificationFailedException;
@@ -47,10 +46,7 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 import org.whispersystems.signalservice.api.push.exceptions.NonSuccessfulResponseCodeException;
 import org.whispersystems.signalservice.api.util.UuidUtil;
 
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -75,6 +71,10 @@ class GroupV2Helper {
     GroupV2Helper(final Context context) {
         this.dependencies = context.getDependencies();
         this.context = context;
+    }
+
+    void clearAuthCredentialCache() {
+        groupApiCredentials = null;
     }
 
     DecryptedGroup getDecryptedGroup(final GroupSecretParams groupSecretParams) throws NotAGroupMemberException {
@@ -134,10 +134,9 @@ class GroupV2Helper {
     }
 
     Pair<GroupInfoV2, DecryptedGroup> createGroup(
-            String name, Set<RecipientId> members, File avatarFile
-    ) throws IOException {
-        final var avatarBytes = readAvatarBytes(avatarFile);
-        final var newGroup = buildNewGroup(name, members, avatarBytes);
+            String name, Set<RecipientId> members, byte[] avatarFile
+    ) {
+        final var newGroup = buildNewGroup(name, members, avatarFile);
         if (newGroup == null) {
             return null;
         }
@@ -164,14 +163,6 @@ class GroupV2Helper {
         var g = new GroupInfoV2(groupId, masterKey, context.getAccount().getRecipientResolver());
 
         return new Pair<>(g, decryptedGroup);
-    }
-
-    private byte[] readAvatarBytes(final File avatarFile) throws IOException {
-        final byte[] avatarBytes;
-        try (InputStream avatar = avatarFile == null ? null : new FileInputStream(avatarFile)) {
-            avatarBytes = avatar == null ? null : IOUtils.readFully(avatar);
-        }
-        return avatarBytes;
     }
 
     private GroupsV2Operations.NewGroup buildNewGroup(
@@ -206,7 +197,7 @@ class GroupV2Helper {
     }
 
     Pair<DecryptedGroup, GroupChange> updateGroup(
-            GroupInfoV2 groupInfoV2, String name, String description, File avatarFile
+            GroupInfoV2 groupInfoV2, String name, String description, byte[] avatarFile
     ) throws IOException {
         final var groupSecretParams = GroupSecretParams.deriveFromMasterKey(groupInfoV2.getMasterKey());
         var groupOperations = dependencies.getGroupsV2Operations().forGroup(groupSecretParams);
@@ -218,9 +209,8 @@ class GroupV2Helper {
         }
 
         if (avatarFile != null) {
-            final var avatarBytes = readAvatarBytes(avatarFile);
             var avatarCdnKey = dependencies.getGroupsV2Api()
-                    .uploadAvatar(avatarBytes, groupSecretParams, getGroupAuthForToday(groupSecretParams));
+                    .uploadAvatar(avatarFile, groupSecretParams, getGroupAuthForToday(groupSecretParams));
             change.setModifyAvatar(GroupChange.Actions.ModifyAvatarAction.newBuilder().setAvatar(avatarCdnKey));
         }
 
@@ -285,6 +275,28 @@ class GroupV2Helper {
                 .map(ServiceId::uuid)
                 .collect(Collectors.toSet());
         return ejectMembers(groupInfoV2, memberUuids);
+    }
+
+    Pair<DecryptedGroup, GroupChange> approveJoinRequestMembers(
+            GroupInfoV2 groupInfoV2, Set<RecipientId> members
+    ) throws IOException {
+        final var memberUuids = members.stream()
+                .map(context.getRecipientHelper()::resolveSignalServiceAddress)
+                .map(SignalServiceAddress::getServiceId)
+                .map(ServiceId::uuid)
+                .collect(Collectors.toSet());
+        return approveJoinRequest(groupInfoV2, memberUuids);
+    }
+
+    Pair<DecryptedGroup, GroupChange> refuseJoinRequestMembers(
+            GroupInfoV2 groupInfoV2, Set<RecipientId> members
+    ) throws IOException {
+        final var memberUuids = members.stream()
+                .map(context.getRecipientHelper()::resolveSignalServiceAddress)
+                .map(SignalServiceAddress::getServiceId)
+                .map(ServiceId::uuid)
+                .collect(Collectors.toSet());
+        return refuseJoinRequest(groupInfoV2, memberUuids);
     }
 
     Pair<DecryptedGroup, GroupChange> revokeInvitedMembers(
@@ -511,6 +523,20 @@ class GroupV2Helper {
             }
         }).collect(Collectors.toSet());
         return commitChange(groupInfoV2, groupOperations.createRemoveInvitationChange(uuidCipherTexts));
+    }
+
+    private Pair<DecryptedGroup, GroupChange> approveJoinRequest(
+            GroupInfoV2 groupInfoV2, Set<UUID> uuids
+    ) throws IOException {
+        final GroupsV2Operations.GroupOperations groupOperations = getGroupOperations(groupInfoV2);
+        return commitChange(groupInfoV2, groupOperations.createApproveGroupJoinRequest(uuids));
+    }
+
+    private Pair<DecryptedGroup, GroupChange> refuseJoinRequest(
+            GroupInfoV2 groupInfoV2, Set<UUID> uuids
+    ) throws IOException {
+        final GroupsV2Operations.GroupOperations groupOperations = getGroupOperations(groupInfoV2);
+        return commitChange(groupInfoV2, groupOperations.createRefuseGroupJoinRequest(uuids, false, List.of()));
     }
 
     private Pair<DecryptedGroup, GroupChange> ejectMembers(

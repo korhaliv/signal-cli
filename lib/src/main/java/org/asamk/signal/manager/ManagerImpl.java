@@ -16,6 +16,7 @@
  */
 package org.asamk.signal.manager;
 
+import org.asamk.signal.manager.api.AlreadyReceivingException;
 import org.asamk.signal.manager.api.AttachmentInvalidException;
 import org.asamk.signal.manager.api.Configuration;
 import org.asamk.signal.manager.api.Device;
@@ -25,9 +26,12 @@ import org.asamk.signal.manager.api.InactiveGroupLinkException;
 import org.asamk.signal.manager.api.InvalidDeviceLinkException;
 import org.asamk.signal.manager.api.InvalidStickerException;
 import org.asamk.signal.manager.api.Message;
+import org.asamk.signal.manager.api.MessageEnvelope;
 import org.asamk.signal.manager.api.NotPrimaryDeviceException;
 import org.asamk.signal.manager.api.Pair;
+import org.asamk.signal.manager.api.PendingAdminApprovalException;
 import org.asamk.signal.manager.api.ReceiveConfig;
+import org.asamk.signal.manager.api.Recipient;
 import org.asamk.signal.manager.api.RecipientIdentifier;
 import org.asamk.signal.manager.api.SendGroupMessageResults;
 import org.asamk.signal.manager.api.SendMessageResult;
@@ -53,13 +57,13 @@ import org.asamk.signal.manager.storage.SignalAccount;
 import org.asamk.signal.manager.storage.groups.GroupInfo;
 import org.asamk.signal.manager.storage.identities.IdentityInfo;
 import org.asamk.signal.manager.storage.recipients.Profile;
-import org.asamk.signal.manager.storage.recipients.Recipient;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
 import org.asamk.signal.manager.storage.stickerPacks.JsonStickerPack;
 import org.asamk.signal.manager.storage.stickerPacks.StickerPackStore;
 import org.asamk.signal.manager.storage.stickers.StickerPack;
 import org.asamk.signal.manager.util.AttachmentUtils;
 import org.asamk.signal.manager.util.KeyUtils;
+import org.asamk.signal.manager.util.MimeUtils;
 import org.asamk.signal.manager.util.StickerUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,12 +77,16 @@ import org.whispersystems.signalservice.api.push.ServiceId;
 import org.whispersystems.signalservice.api.util.DeviceNameUtil;
 import org.whispersystems.signalservice.api.util.InvalidNumberException;
 import org.whispersystems.signalservice.api.util.PhoneNumberFormatter;
+import org.whispersystems.signalservice.api.util.StreamDetails;
 import org.whispersystems.signalservice.internal.util.Hex;
 import org.whispersystems.signalservice.internal.util.Util;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -216,13 +224,14 @@ class ManagerImpl implements Manager {
 
         return numbers.stream().collect(Collectors.toMap(n -> n, n -> {
             final var number = canonicalizedNumbers.get(n);
-            final var aci = registeredUsers.get(number);
-            final var profile = aci == null
+            final var user = registeredUsers.get(number);
+            final var serviceId = user == null ? null : user.getServiceId();
+            final var profile = serviceId == null
                     ? null
                     : context.getProfileHelper()
-                            .getRecipientProfile(account.getRecipientResolver().resolveRecipient(aci));
+                            .getRecipientProfile(account.getRecipientResolver().resolveRecipient(serviceId));
             return new UserStatus(number.isEmpty() ? null : number,
-                    aci == null ? null : aci.uuid(),
+                    serviceId == null ? null : serviceId.uuid(),
                     profile != null
                             && profile.getUnidentifiedAccessMode() == Profile.UnidentifiedAccessMode.UNRESTRICTED);
         }));
@@ -385,7 +394,7 @@ class ManagerImpl implements Manager {
 
     @Override
     public Pair<GroupId, SendGroupMessageResults> createGroup(
-            String name, Set<RecipientIdentifier.Single> members, File avatarFile
+            String name, Set<RecipientIdentifier.Single> members, String avatarFile
     ) throws IOException, AttachmentInvalidException, UnregisteredRecipientException {
         return context.getGroupHelper()
                 .createGroup(name,
@@ -431,7 +440,7 @@ class ManagerImpl implements Manager {
     @Override
     public Pair<GroupId, SendGroupMessageResults> joinGroup(
             GroupInviteLinkUrl inviteLinkUrl
-    ) throws IOException, InactiveGroupLinkException {
+    ) throws IOException, InactiveGroupLinkException, PendingAdminApprovalException {
         return context.getGroupHelper().joinGroup(inviteLinkUrl);
     }
 
@@ -545,7 +554,7 @@ class ManagerImpl implements Manager {
         final var selfProfile = context.getProfileHelper().getSelfProfile();
         if (selfProfile == null || selfProfile.getDisplayName().isEmpty()) {
             logger.warn(
-                    "No profile name set. When sending a message it's recommended to set a profile name wit the updateProfile command. This may become mandatory in the future.");
+                    "No profile name set. When sending a message it's recommended to set a profile name with the updateProfile command. This may become mandatory in the future.");
         }
         final var messageBuilder = SignalServiceDataMessage.newBuilder();
         applyMessage(messageBuilder, message);
@@ -555,7 +564,15 @@ class ManagerImpl implements Manager {
     private void applyMessage(
             final SignalServiceDataMessage.Builder messageBuilder, final Message message
     ) throws AttachmentInvalidException, IOException, UnregisteredRecipientException, InvalidStickerException {
-        messageBuilder.withBody(message.messageText());
+        if (message.messageText().length() > 2000) {
+            final var messageBytes = message.messageText().getBytes(StandardCharsets.UTF_8);
+            final var textAttachment = AttachmentUtils.createAttachmentStream(new StreamDetails(new ByteArrayInputStream(
+                    messageBytes), MimeUtils.LONG_TEXT, messageBytes.length), Optional.empty());
+            messageBuilder.withBody(message.messageText().substring(0, 2000));
+            messageBuilder.withAttachment(textAttachment);
+        } else {
+            messageBuilder.withBody(message.messageText());
+        }
         if (message.attachments().size() > 0) {
             messageBuilder.withAttachments(context.getAttachmentHelper().uploadAttachments(message.attachments()));
         }
@@ -610,6 +627,14 @@ class ManagerImpl implements Manager {
             }
             messageBuilder.withPreviews(previews);
         }
+        if (message.storyReply().isPresent()) {
+            final var storyReply = message.storyReply().get();
+            final var authorServiceId = context.getRecipientHelper()
+                    .resolveSignalServiceAddress(context.getRecipientHelper().resolveRecipient(storyReply.author()))
+                    .getServiceId();
+            messageBuilder.withStoryContext(new SignalServiceDataMessage.StoryContext(authorServiceId,
+                    storyReply.timestamp()));
+        }
     }
 
     private ArrayList<SignalServiceDataMessage.Mention> resolveMentions(final List<Message.Mention> mentionList) throws UnregisteredRecipientException {
@@ -653,14 +678,19 @@ class ManagerImpl implements Manager {
             boolean remove,
             RecipientIdentifier.Single targetAuthor,
             long targetSentTimestamp,
-            Set<RecipientIdentifier> recipients
+            Set<RecipientIdentifier> recipients,
+            final boolean isStory
     ) throws IOException, NotAGroupMemberException, GroupNotFoundException, GroupSendingNotAllowedException, UnregisteredRecipientException {
         var targetAuthorRecipientId = context.getRecipientHelper().resolveRecipient(targetAuthor);
-        var reaction = new SignalServiceDataMessage.Reaction(emoji,
-                remove,
-                context.getRecipientHelper().resolveSignalServiceAddress(targetAuthorRecipientId).getServiceId(),
-                targetSentTimestamp);
+        final var authorServiceId = context.getRecipientHelper()
+                .resolveSignalServiceAddress(targetAuthorRecipientId)
+                .getServiceId();
+        var reaction = new SignalServiceDataMessage.Reaction(emoji, remove, authorServiceId, targetSentTimestamp);
         final var messageBuilder = SignalServiceDataMessage.newBuilder().withReaction(reaction);
+        if (isStory) {
+            messageBuilder.withStoryContext(new SignalServiceDataMessage.StoryContext(authorServiceId,
+                    targetSentTimestamp));
+        }
         return sendMessage(messageBuilder, recipients);
     }
 
@@ -669,7 +699,7 @@ class ManagerImpl implements Manager {
             byte[] receipt, String note, RecipientIdentifier.Single recipient
     ) throws IOException {
         final var paymentNotification = new SignalServiceDataMessage.PaymentNotification(receipt, note);
-        final var payment = new SignalServiceDataMessage.Payment(paymentNotification);
+        final var payment = new SignalServiceDataMessage.Payment(paymentNotification, null);
         final var messageBuilder = SignalServiceDataMessage.newBuilder().withPayment(payment);
         try {
             return sendMessage(messageBuilder, Set.of(recipient));
@@ -706,13 +736,13 @@ class ManagerImpl implements Manager {
 
     @Override
     public void deleteRecipient(final RecipientIdentifier.Single recipient) {
-        account.removeRecipient(account.getRecipientResolver().resolveRecipient(recipient.toPartialRecipientAddress()));
+        account.removeRecipient(account.getRecipientResolver().resolveRecipient(recipient.getIdentifier()));
     }
 
     @Override
     public void deleteContact(final RecipientIdentifier.Single recipient) {
         account.getContactStore()
-                .deleteContact(account.getRecipientResolver().resolveRecipient(recipient.toPartialRecipientAddress()));
+                .deleteContact(account.getRecipientResolver().resolveRecipient(recipient.getIdentifier()));
     }
 
     @Override
@@ -847,9 +877,6 @@ class ManagerImpl implements Manager {
 
     @Override
     public void addReceiveHandler(final ReceiveMessageHandler handler, final boolean isWeakListener) {
-        if (isReceivingSynchronous) {
-            throw new IllegalStateException("Already receiving message synchronously.");
-        }
         synchronized (messageHandlers) {
             if (isWeakListener) {
                 weakHandlers.add(handler);
@@ -863,23 +890,12 @@ class ManagerImpl implements Manager {
     private static final AtomicInteger threadNumber = new AtomicInteger(0);
 
     private void startReceiveThreadIfRequired() {
-        if (receiveThread != null) {
+        if (receiveThread != null || isReceivingSynchronous) {
             return;
         }
         receiveThread = new Thread(() -> {
             logger.debug("Starting receiving messages");
-            context.getReceiveHelper().receiveMessagesContinuously((envelope, e) -> {
-                synchronized (messageHandlers) {
-                    final var handlers = Stream.concat(messageHandlers.stream(), weakHandlers.stream()).toList();
-                    handlers.forEach(h -> {
-                        try {
-                            h.handleMessage(envelope, e);
-                        } catch (Throwable ex) {
-                            logger.warn("Message handler failed, ignoring", ex);
-                        }
-                    });
-                }
-            });
+            context.getReceiveHelper().receiveMessagesContinuously(this::passReceivedMessageToHandlers);
             logger.debug("Finished receiving messages");
             synchronized (messageHandlers) {
                 receiveThread = null;
@@ -894,6 +910,18 @@ class ManagerImpl implements Manager {
         receiveThread.setName("receive-" + threadNumber.getAndIncrement());
 
         receiveThread.start();
+    }
+
+    private void passReceivedMessageToHandlers(MessageEnvelope envelope, Throwable e) {
+        synchronized (messageHandlers) {
+            Stream.concat(messageHandlers.stream(), weakHandlers.stream()).forEach(h -> {
+                try {
+                    h.handleMessage(envelope, e);
+                } catch (Throwable ex) {
+                    logger.warn("Message handler failed, ignoring", ex);
+                }
+            });
+        }
     }
 
     @Override
@@ -934,28 +962,35 @@ class ManagerImpl implements Manager {
     }
 
     @Override
-    public void receiveMessages(Duration timeout, ReceiveMessageHandler handler) throws IOException {
-        receiveMessages(timeout, true, handler);
-    }
-
-    @Override
-    public void receiveMessages(ReceiveMessageHandler handler) throws IOException {
-        receiveMessages(Duration.ofMinutes(1), false, handler);
+    public void receiveMessages(
+            Optional<Duration> timeout, Optional<Integer> maxMessages, ReceiveMessageHandler handler
+    ) throws IOException, AlreadyReceivingException {
+        receiveMessages(timeout.orElse(Duration.ofMinutes(1)), timeout.isPresent(), maxMessages.orElse(null), handler);
     }
 
     private void receiveMessages(
-            Duration timeout, boolean returnOnTimeout, ReceiveMessageHandler handler
-    ) throws IOException {
-        if (isReceiving()) {
-            throw new IllegalStateException("Already receiving message.");
+            Duration timeout, boolean returnOnTimeout, Integer maxMessages, ReceiveMessageHandler handler
+    ) throws IOException, AlreadyReceivingException {
+        synchronized (messageHandlers) {
+            if (isReceiving()) {
+                throw new AlreadyReceivingException("Already receiving message.");
+            }
+            isReceivingSynchronous = true;
+            receiveThread = Thread.currentThread();
         }
-        isReceivingSynchronous = true;
-        receiveThread = Thread.currentThread();
         try {
-            context.getReceiveHelper().receiveMessages(timeout, returnOnTimeout, handler);
+            context.getReceiveHelper().receiveMessages(timeout, returnOnTimeout, maxMessages, (envelope, e) -> {
+                passReceivedMessageToHandlers(envelope, e);
+                handler.handleMessage(envelope, e);
+            });
         } finally {
-            receiveThread = null;
-            isReceivingSynchronous = false;
+            synchronized (messageHandlers) {
+                receiveThread = null;
+                isReceivingSynchronous = false;
+                if (messageHandlers.size() > 0) {
+                    startReceiveThreadIfRequired();
+                }
+            }
         }
     }
 
@@ -1004,7 +1039,16 @@ class ManagerImpl implements Manager {
         }
         // refresh profiles of explicitly given recipients
         context.getProfileHelper().refreshRecipientProfiles(recipientIds);
-        return account.getRecipientStore().getRecipients(onlyContacts, blocked, recipientIds, name);
+        return account.getRecipientStore()
+                .getRecipients(onlyContacts, blocked, recipientIds, name)
+                .stream()
+                .map(s -> new Recipient(s.getRecipientId(),
+                        s.getAddress().toApiRecipientAddress(),
+                        s.getContact(),
+                        s.getProfileKey(),
+                        s.getExpiringProfileKeyCredential(),
+                        s.getProfile()))
+                .toList();
     }
 
     @Override
@@ -1048,7 +1092,7 @@ class ManagerImpl implements Manager {
                 .resolveRecipientAddress(account.getRecipientResolver().resolveRecipient(identityInfo.getServiceId()));
         final var scannableFingerprint = context.getIdentityHelper()
                 .computeSafetyNumberForScanning(identityInfo.getServiceId(), identityInfo.getIdentityKey());
-        return new Identity(address,
+        return new Identity(address.toApiRecipientAddress(),
                 identityInfo.getIdentityKey(),
                 context.getIdentityHelper()
                         .computeSafetyNumber(identityInfo.getServiceId(), identityInfo.getIdentityKey()),
@@ -1122,6 +1166,11 @@ class ManagerImpl implements Manager {
         synchronized (closedListeners) {
             closedListeners.add(listener);
         }
+    }
+
+    @Override
+    public InputStream retrieveAttachment(final String id) throws IOException {
+        return context.getAttachmentHelper().retrieveAttachment(id).getStream();
     }
 
     @Override

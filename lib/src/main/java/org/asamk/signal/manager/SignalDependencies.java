@@ -40,6 +40,8 @@ public class SignalDependencies {
     private final ExecutorService executor;
     private final SignalSessionLock sessionLock;
 
+    private boolean allowStories = true;
+
     private SignalServiceAccountManager accountManager;
     private GroupsV2Api groupsV2Api;
     private GroupsV2Operations groupsV2Operations;
@@ -72,6 +74,14 @@ public class SignalDependencies {
     public void resetAfterAddressChange() {
         this.messageSender = null;
         this.cipher = null;
+        getSignalWebSocket().forceNewWebSockets();
+    }
+
+    /**
+     * This method needs to be called before the first websocket is created
+     */
+    public void setAllowStories(final boolean allowStories) {
+        this.allowStories = allowStories;
     }
 
     public ServiceEnvironmentConfig getServiceEnvironmentConfig() {
@@ -134,7 +144,8 @@ public class SignalDependencies {
                             serviceEnvironmentConfig.getSignalServiceConfiguration(),
                             Optional.of(credentialsProvider),
                             userAgent,
-                            healthMonitor);
+                            healthMonitor,
+                            allowStories);
                 }
 
                 @Override
@@ -143,7 +154,8 @@ public class SignalDependencies {
                             serviceEnvironmentConfig.getSignalServiceConfiguration(),
                             Optional.empty(),
                             userAgent,
-                            healthMonitor);
+                            healthMonitor,
+                            allowStories);
                 }
             };
             signalWebSocket = new SignalWebSocket(webSocketFactory);

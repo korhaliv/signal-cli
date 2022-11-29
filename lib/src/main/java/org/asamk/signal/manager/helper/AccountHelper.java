@@ -9,15 +9,20 @@ import org.asamk.signal.manager.api.NonNormalizedPhoneNumberException;
 import org.asamk.signal.manager.api.PinLockedException;
 import org.asamk.signal.manager.config.ServiceConfig;
 import org.asamk.signal.manager.storage.SignalAccount;
+import org.asamk.signal.manager.util.KeyUtils;
 import org.asamk.signal.manager.util.NumberVerificationUtils;
+import org.signal.libsignal.protocol.IdentityKeyPair;
 import org.signal.libsignal.protocol.InvalidKeyException;
+import org.signal.libsignal.protocol.state.SignedPreKeyRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.signalservice.api.account.ChangePhoneNumberRequest;
 import org.whispersystems.signalservice.api.push.ACI;
 import org.whispersystems.signalservice.api.push.PNI;
+import org.whispersystems.signalservice.api.push.ServiceIdType;
 import org.whispersystems.signalservice.api.push.SignedPreKeyEntity;
 import org.whispersystems.signalservice.api.push.exceptions.AuthorizationFailedException;
+import org.whispersystems.signalservice.api.push.exceptions.DeprecatedVersionException;
 import org.whispersystems.signalservice.api.util.DeviceNameUtil;
 import org.whispersystems.signalservice.internal.push.OutgoingPushMessage;
 
@@ -73,6 +78,9 @@ public class AccountHelper {
                     && account.getRegistrationLockPin() != null) {
                 migrateRegistrationPin();
             }
+        } catch (DeprecatedVersionException e) {
+            logger.debug("Signal-Server returned deprecated version exception", e);
+            throw e;
         } catch (AuthorizationFailedException e) {
             account.setRegistered(false);
             throw e;
@@ -95,12 +103,27 @@ public class AccountHelper {
         account.setNumber(number);
         account.setAci(aci);
         account.setPni(pni);
+        if (account.isPrimaryDevice() && account.getPniIdentityKeyPair() == null && account.getPni() != null) {
+            account.setPniIdentityKeyPair(KeyUtils.generateIdentityKeyPair());
+        }
         account.getRecipientTrustedResolver().resolveSelfRecipientTrusted(account.getSelfRecipientAddress());
         // TODO check and update remote storage
         context.getUnidentifiedAccessHelper().rotateSenderCertificates();
         dependencies.resetAfterAddressChange();
-        dependencies.getSignalWebSocket().forceNewWebSockets();
         context.getAccountFileUpdater().updateAccountIdentifiers(account.getNumber(), account.getAci());
+    }
+
+    public void setPni(
+            final PNI updatedPni,
+            final IdentityKeyPair pniIdentityKeyPair,
+            final SignedPreKeyRecord pniSignedPreKey,
+            final int localPniRegistrationId
+    ) throws IOException {
+        account.setPni(updatedPni, pniIdentityKeyPair, pniSignedPreKey, localPniRegistrationId);
+        context.getPreKeyHelper().refreshPreKeysIfNecessary(ServiceIdType.PNI);
+        if (account.getPni() == null || !account.getPni().equals(updatedPni)) {
+            context.getGroupV2Helper().clearAuthCredentialCache();
+        }
     }
 
     public void startChangeNumber(

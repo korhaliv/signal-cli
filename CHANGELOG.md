@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [0.11.5.1] - 2022-11-09
+
+### Fixed
+- Fix updating from older signal-cli version
+
+## [0.11.5] - 2022-11-07
+**Attention**: Now requires native libsignal-client version 0.21.1
+
+### Added
+- Add `--http` flag to `daemon` command to provide a JSON-RPC http endpoint (`/api/v1/rpc`). (Thanks @ced-b)
+- The `receive` method is now also available in JSON-RPC daemon mode, for polling new messages.
+- Add `getAttachment` command to get attachment file base64 encoded. (Thanks @ced-b)
+- Add `--disable-send-log` to disable the message send log.
+- Add `--story` to `sendReaction` command, to react to stories.
+- Add `--story-timestamp` and `--story-author` to `send` command, to reply to stories.
+- Add `--max-messages` to `receive` command, to only receive a certain number of messages.
+
+### Changed
+- Send long text messages as attachment instead. This matches the behavior of the official clients.
+- Store attachments with a file extension, for common file types.
+
+## [0.11.4] - 2022-10-19
+
+### Added
+- Approve/Refuse group join requests, using same interface as adding/removing members
+- Add --ignore-stories flag to prevent receiving story messages
+
+### Fixed
+- Fixed issue with receiving messages that can't be decrypted
+- Do not discard incoming group join messages
+
+### Improved
+- Add code to receive new PNI after change number
+
+## [0.11.3] - 2022-10-07
+
+### Fixed
+- Fix sending messages to groups (in non-daemon mode)
+- Fix updating from older signal-cli version
+- Fix issue with handling decryption error message
+- Fix graalvm native build (Thanks @bentolor)
+
+## [0.11.2] - 2022-10-06
+
+### Fixed
+- Update user agent version to work with new Signal-Server check
+
 ## [0.11.1] - 2022-10-05
 
 ### Fixed

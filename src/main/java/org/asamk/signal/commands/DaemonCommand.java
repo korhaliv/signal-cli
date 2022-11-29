@@ -13,6 +13,7 @@ import org.asamk.signal.commands.exceptions.UnexpectedErrorException;
 import org.asamk.signal.commands.exceptions.UserErrorException;
 import org.asamk.signal.dbus.DbusSignalControlImpl;
 import org.asamk.signal.dbus.DbusSignalImpl;
+import org.asamk.signal.http.HttpServerHandler;
 import org.asamk.signal.json.JsonReceiveMessageHandler;
 import org.asamk.signal.jsonrpc.SignalJsonRpcDispatcherHandler;
 import org.asamk.signal.manager.Manager;
@@ -69,6 +70,10 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
                 .nargs("?")
                 .setConst("localhost:7583")
                 .help("Expose a JSON-RPC interface on a TCP socket (default localhost:7583).");
+        subparser.addArgument("--http")
+                .nargs("?")
+                .setConst("localhost:8080")
+                .help("Expose a JSON-RPC interface as http endpoint (default localhost:8080).");
         subparser.addArgument("--no-receive-stdout")
                 .help("Don’t print received messages to stdout.")
                 .action(Arguments.storeTrue());
@@ -78,6 +83,9 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
                 .setDefault(ReceiveMode.ON_START);
         subparser.addArgument("--ignore-attachments")
                 .help("Don’t download attachments of received messages.")
+                .action(Arguments.storeTrue());
+        subparser.addArgument("--ignore-stories")
+                .help("Don’t receive story messages from the server.")
                 .action(Arguments.storeTrue());
         subparser.addArgument("--send-read-receipts")
                 .help("Send read receipts for all incoming data messages (in addition to the default delivery receipts)")
@@ -97,9 +105,10 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
         final var noReceiveStdOut = Boolean.TRUE.equals(ns.getBoolean("no-receive-stdout"));
         final var receiveMode = ns.<ReceiveMode>get("receive-mode");
         final var ignoreAttachments = Boolean.TRUE.equals(ns.getBoolean("ignore-attachments"));
-        final boolean sendReadReceipts = Boolean.TRUE.equals(ns.getBoolean("send-read-receipts"));
+        final var ignoreStories = Boolean.TRUE.equals(ns.getBoolean("ignore-stories"));
+        final var sendReadReceipts = Boolean.TRUE.equals(ns.getBoolean("send-read-receipts"));
 
-        m.setReceiveConfig(new ReceiveConfig(ignoreAttachments, sendReadReceipts));
+        m.setReceiveConfig(new ReceiveConfig(ignoreAttachments, ignoreStories, sendReadReceipts));
         addDefaultReceiveHandler(m, noReceiveStdOut ? null : outputWriter, receiveMode != ReceiveMode.ON_START);
 
         final Channel inheritedChannel;
@@ -124,6 +133,16 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
             final var serverChannel = IOUtils.bindSocket(address);
             runSocketSingleAccount(m, serverChannel, receiveMode == ReceiveMode.MANUAL);
         }
+        final var httpAddress = ns.getString("http");
+        if (httpAddress != null) {
+            final var address = IOUtils.parseInetSocketAddress(httpAddress);
+            final var handler = new HttpServerHandler(address, m);
+            try {
+                handler.init();
+            } catch (IOException ex) {
+                throw new IOErrorException("Failed to initialize HTTP Server", ex);
+            }
+        }
         final var isDbusSystem = Boolean.TRUE.equals(ns.getBoolean("dbus-system"));
         if (isDbusSystem) {
             runDbusSingleAccount(m, true, receiveMode != ReceiveMode.ON_START);
@@ -133,6 +152,7 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
                 !isDbusSystem
                         && socketFile == null
                         && tcpAddress == null
+                        && httpAddress == null
                         && !(inheritedChannel instanceof ServerSocketChannel)
         )) {
             runDbusSingleAccount(m, false, receiveMode != ReceiveMode.ON_START);
@@ -160,9 +180,10 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
         final var noReceiveStdOut = Boolean.TRUE.equals(ns.getBoolean("no-receive-stdout"));
         final var receiveMode = ns.<ReceiveMode>get("receive-mode");
         final var ignoreAttachments = Boolean.TRUE.equals(ns.getBoolean("ignore-attachments"));
-        final boolean sendReadReceipts = Boolean.TRUE.equals(ns.getBoolean("send-read-receipts"));
+        final var ignoreStories = Boolean.TRUE.equals(ns.getBoolean("ignore-stories"));
+        final var sendReadReceipts = Boolean.TRUE.equals(ns.getBoolean("send-read-receipts"));
 
-        final var receiveConfig = new ReceiveConfig(ignoreAttachments, sendReadReceipts);
+        final var receiveConfig = new ReceiveConfig(ignoreAttachments, ignoreStories, sendReadReceipts);
         c.getManagers().forEach(m -> {
             m.setReceiveConfig(receiveConfig);
             addDefaultReceiveHandler(m, noReceiveStdOut ? null : outputWriter, receiveMode != ReceiveMode.ON_START);
@@ -194,6 +215,16 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
             final var serverChannel = IOUtils.bindSocket(address);
             runSocketMultiAccount(c, serverChannel, receiveMode == ReceiveMode.MANUAL);
         }
+        final var httpAddress = ns.getString("http");
+        if (httpAddress != null) {
+            final var address = IOUtils.parseInetSocketAddress(httpAddress);
+            final var handler = new HttpServerHandler(address, c);
+            try {
+                handler.init();
+            } catch (IOException ex) {
+                throw new IOErrorException("Failed to initialize HTTP Server", ex);
+            }
+        }
         final var isDbusSystem = Boolean.TRUE.equals(ns.getBoolean("dbus-system"));
         if (isDbusSystem) {
             runDbusMultiAccount(c, receiveMode != ReceiveMode.ON_START, true);
@@ -203,6 +234,7 @@ public class DaemonCommand implements MultiLocalCommand, LocalCommand {
                 !isDbusSystem
                         && socketFile == null
                         && tcpAddress == null
+                        && httpAddress == null
                         && !(inheritedChannel instanceof ServerSocketChannel)
         )) {
             runDbusMultiAccount(c, receiveMode != ReceiveMode.ON_START, false);
