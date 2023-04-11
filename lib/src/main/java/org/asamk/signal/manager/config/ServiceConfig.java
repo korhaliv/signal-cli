@@ -40,6 +40,7 @@ public class ServiceConfig {
                 true,
                 true,
                 false,
+                false,
                 false);
 
         try {
@@ -89,14 +90,12 @@ public class ServiceConfig {
                     LiveConfig.getUnidentifiedSenderTrustRoot(),
                     LiveConfig.createKeyBackupConfig(),
                     LiveConfig.createFallbackKeyBackupConfigs(),
-                    LiveConfig.getCdsMrenclave(),
                     LiveConfig.getCdsiMrenclave());
             case STAGING -> new ServiceEnvironmentConfig(serviceEnvironment,
                     StagingConfig.createDefaultServiceConfiguration(interceptors),
                     StagingConfig.getUnidentifiedSenderTrustRoot(),
                     StagingConfig.createKeyBackupConfig(),
                     StagingConfig.createFallbackKeyBackupConfigs(),
-                    StagingConfig.getCdsMrenclave(),
                     StagingConfig.getCdsiMrenclave());
         };
     }

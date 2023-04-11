@@ -200,6 +200,7 @@ public class SendHelper {
         } catch (IOException e) {
             var address = context.getRecipientHelper().resolveSignalServiceAddress(account.getSelfRecipientId());
             logger.warn("Failed to send message due to IO exception: {}", e.getMessage());
+            logger.debug("Exception", e);
             return SendMessageResult.networkFailure(address);
         }
     }
@@ -491,7 +492,11 @@ public class SendHelper {
 
             final var serviceId = account.getRecipientAddressResolver()
                     .resolveRecipientAddress(recipientId)
-                    .getServiceId();
+                    .serviceId()
+                    .orElse(null);
+            if (serviceId == null) {
+                continue;
+            }
             final var identity = account.getIdentityKeyStore().getIdentityInfo(serviceId);
             if (identity == null || !identity.getTrustLevel().isTrusted()) {
                 continue;
@@ -642,6 +647,7 @@ public class SendHelper {
             return SendMessageResult.identityFailure(address, e.getIdentityKey());
         } catch (IOException e) {
             logger.warn("Failed to send message due to IO exception: {}", e.getMessage());
+            logger.debug("Exception", e);
             return SendMessageResult.networkFailure(address);
         }
     }
