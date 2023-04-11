@@ -25,6 +25,7 @@ import org.asamk.signal.manager.api.Identity;
 import org.asamk.signal.manager.api.InactiveGroupLinkException;
 import org.asamk.signal.manager.api.InvalidDeviceLinkException;
 import org.asamk.signal.manager.api.InvalidStickerException;
+import org.asamk.signal.manager.api.InvalidUsernameException;
 import org.asamk.signal.manager.api.Message;
 import org.asamk.signal.manager.api.MessageEnvelope;
 import org.asamk.signal.manager.api.NotPrimaryDeviceException;
@@ -65,6 +66,7 @@ import org.asamk.signal.manager.util.AttachmentUtils;
 import org.asamk.signal.manager.util.KeyUtils;
 import org.asamk.signal.manager.util.MimeUtils;
 import org.asamk.signal.manager.util.StickerUtils;
+import org.signal.libsignal.usernames.BaseUsernameException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.signalservice.api.SignalSessionLock;
@@ -288,6 +290,24 @@ class ManagerImpl implements Manager {
                                 : updateProfile.getAvatar() == null ? null : Optional.of(updateProfile.getAvatar()),
                         updateProfile.getMobileCoinAddress());
         context.getSyncHelper().sendSyncFetchProfileMessage();
+    }
+
+    void refreshCurrentUsername() throws IOException, BaseUsernameException {
+        context.getAccountHelper().refreshCurrentUsername();
+    }
+
+    @Override
+    public String setUsername(final String username) throws IOException, InvalidUsernameException {
+        try {
+            return context.getAccountHelper().reserveUsername(username);
+        } catch (BaseUsernameException e) {
+            throw new InvalidUsernameException(e.getMessage() + " (" + e.getClass().getSimpleName() + ")", e);
+        }
+    }
+
+    @Override
+    public void deleteUsername() throws IOException {
+        context.getAccountHelper().deleteUsername();
     }
 
     @Override
@@ -569,7 +589,7 @@ class ManagerImpl implements Manager {
             final var textAttachment = AttachmentUtils.createAttachmentStream(new StreamDetails(new ByteArrayInputStream(
                     messageBytes), MimeUtils.LONG_TEXT, messageBytes.length), Optional.empty());
             messageBuilder.withBody(message.messageText().substring(0, 2000));
-            messageBuilder.withAttachment(textAttachment);
+            messageBuilder.withAttachment(context.getAttachmentHelper().uploadAttachment(textAttachment));
         } else {
             messageBuilder.withBody(message.messageText());
         }
@@ -588,7 +608,8 @@ class ManagerImpl implements Manager {
                     quote.message(),
                     List.of(),
                     resolveMentions(quote.mentions()),
-                    SignalServiceDataMessage.Quote.Type.NORMAL));
+                    SignalServiceDataMessage.Quote.Type.NORMAL,
+                    List.of()));
         }
         if (message.sticker().isPresent()) {
             final var sticker = message.sticker().get();
@@ -655,14 +676,17 @@ class ManagerImpl implements Manager {
         var delete = new SignalServiceDataMessage.RemoteDelete(targetSentTimestamp);
         final var messageBuilder = SignalServiceDataMessage.newBuilder().withRemoteDelete(delete);
         for (final var recipient : recipients) {
-            if (recipient instanceof RecipientIdentifier.Single r) {
+            if (recipient instanceof RecipientIdentifier.Uuid u) {
+                account.getMessageSendLogStore()
+                        .deleteEntryForRecipientNonGroup(targetSentTimestamp, ServiceId.from(u.uuid()));
+            } else if (recipient instanceof RecipientIdentifier.Single r) {
                 try {
                     final var recipientId = context.getRecipientHelper().resolveRecipient(r);
-                    account.getMessageSendLogStore()
-                            .deleteEntryForRecipientNonGroup(targetSentTimestamp,
-                                    account.getRecipientAddressResolver()
-                                            .resolveRecipientAddress(recipientId)
-                                            .getServiceId());
+                    final var address = account.getRecipientAddressResolver().resolveRecipientAddress(recipientId);
+                    if (address.serviceId().isPresent()) {
+                        account.getMessageSendLogStore()
+                                .deleteEntryForRecipientNonGroup(targetSentTimestamp, address.serviceId().get());
+                    }
                 } catch (UnregisteredRecipientException ignored) {
                 }
             } else if (recipient instanceof RecipientIdentifier.Group r) {
@@ -728,21 +752,28 @@ class ManagerImpl implements Manager {
                 final var serviceId = context.getAccount()
                         .getRecipientAddressResolver()
                         .resolveRecipientAddress(recipientId)
-                        .getServiceId();
-                account.getAciSessionStore().deleteAllSessions(serviceId);
+                        .serviceId();
+                if (serviceId.isPresent()) {
+                    account.getAciSessionStore().deleteAllSessions(serviceId.get());
+                }
             }
         }
     }
 
     @Override
     public void deleteRecipient(final RecipientIdentifier.Single recipient) {
-        account.removeRecipient(account.getRecipientResolver().resolveRecipient(recipient.getIdentifier()));
+        final var recipientIdOptional = context.getRecipientHelper().resolveRecipientOptional(recipient);
+        if (recipientIdOptional.isPresent()) {
+            account.removeRecipient(recipientIdOptional.get());
+        }
     }
 
     @Override
     public void deleteContact(final RecipientIdentifier.Single recipient) {
-        account.getContactStore()
-                .deleteContact(account.getRecipientResolver().resolveRecipient(recipient.getIdentifier()));
+        final var recipientIdOptional = context.getRecipientHelper().resolveRecipientOptional(recipient);
+        if (recipientIdOptional.isPresent()) {
+            account.getContactStore().deleteContact(recipientIdOptional.get());
+        }
     }
 
     @Override
@@ -1105,9 +1136,12 @@ class ManagerImpl implements Manager {
     public List<Identity> getIdentities(RecipientIdentifier.Single recipient) {
         ServiceId serviceId;
         try {
-            serviceId = account.getRecipientAddressResolver()
-                    .resolveRecipientAddress(context.getRecipientHelper().resolveRecipient(recipient))
-                    .getServiceId();
+            final var address = account.getRecipientAddressResolver()
+                    .resolveRecipientAddress(context.getRecipientHelper().resolveRecipient(recipient));
+            if (address.serviceId().isEmpty()) {
+                return List.of();
+            }
+            serviceId = address.serviceId().get();
         } catch (UnregisteredRecipientException e) {
             return List.of();
         }

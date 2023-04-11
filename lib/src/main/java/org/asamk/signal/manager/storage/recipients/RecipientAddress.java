@@ -6,7 +6,9 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 
 import java.util.Optional;
 
-public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni, Optional<String> number) {
+public record RecipientAddress(
+        Optional<ServiceId> serviceId, Optional<PNI> pni, Optional<String> number, Optional<String> username
+) {
 
     /**
      * Construct a RecipientAddress.
@@ -15,10 +17,10 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
      * @param number    The phone number of the user, if available.
      */
     public RecipientAddress {
-        if (serviceId.isPresent() && serviceId.get().equals(ServiceId.UNKNOWN)) {
+        if (serviceId.isPresent() && serviceId.get().isUnknown()) {
             serviceId = Optional.empty();
         }
-        if (pni.isPresent() && pni.get().equals(ServiceId.UNKNOWN)) {
+        if (pni.isPresent() && pni.get().isUnknown()) {
             pni = Optional.empty();
         }
         if (serviceId.isEmpty() && pni.isPresent()) {
@@ -38,23 +40,30 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
     }
 
     public RecipientAddress(Optional<ServiceId> serviceId, Optional<String> number) {
-        this(serviceId, Optional.empty(), number);
+        this(serviceId, Optional.empty(), number, Optional.empty());
     }
 
     public RecipientAddress(ServiceId serviceId, String e164) {
-        this(Optional.ofNullable(serviceId), Optional.empty(), Optional.ofNullable(e164));
+        this(Optional.ofNullable(serviceId), Optional.empty(), Optional.ofNullable(e164), Optional.empty());
     }
 
     public RecipientAddress(ServiceId serviceId, PNI pni, String e164) {
-        this(Optional.ofNullable(serviceId), Optional.ofNullable(pni), Optional.ofNullable(e164));
+        this(Optional.ofNullable(serviceId), Optional.ofNullable(pni), Optional.ofNullable(e164), Optional.empty());
+    }
+
+    public RecipientAddress(ServiceId serviceId, PNI pni, String e164, String username) {
+        this(Optional.ofNullable(serviceId),
+                Optional.ofNullable(pni),
+                Optional.ofNullable(e164),
+                Optional.ofNullable(username));
     }
 
     public RecipientAddress(SignalServiceAddress address) {
-        this(Optional.of(address.getServiceId()), Optional.empty(), address.getNumber());
+        this(Optional.of(address.getServiceId()), Optional.empty(), address.getNumber(), Optional.empty());
     }
 
     public RecipientAddress(org.asamk.signal.manager.api.RecipientAddress address) {
-        this(address.uuid().map(ServiceId::from), Optional.empty(), address.number());
+        this(address.uuid().map(ServiceId::from), Optional.empty(), address.number(), address.username());
     }
 
     public RecipientAddress(ServiceId serviceId) {
@@ -66,7 +75,8 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
                 this.serviceId.isEmpty() || this.isServiceIdPNI() || this.serviceId.equals(address.pni)
         ) && !address.isServiceIdPNI() ? address.serviceId : this.serviceId,
                 address.pni.or(this::pni),
-                address.number.or(this::number));
+                address.number.or(this::number),
+                address.username.or(this::username));
     }
 
     public RecipientAddress removeIdentifiersFrom(RecipientAddress address) {
@@ -74,11 +84,8 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
                 ? Optional.empty()
                 : this.serviceId,
                 address.pni.equals(this.pni) || address.serviceId.equals(this.pni) ? Optional.empty() : this.pni,
-                address.number.equals(this.number) ? Optional.empty() : this.number);
-    }
-
-    public ServiceId getServiceId() {
-        return serviceId.orElse(ServiceId.UNKNOWN);
+                address.number.equals(this.number) ? Optional.empty() : this.number,
+                address.username.equals(this.username) ? Optional.empty() : this.username);
     }
 
     public String getIdentifier() {
@@ -118,13 +125,17 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
     }
 
     public boolean hasSingleIdentifier() {
-        return serviceId().isEmpty() || number.isEmpty();
+        final var identifiersCount = serviceId().map(s -> 1).orElse(0)
+                + number().map(s -> 1).orElse(0)
+                + username().map(s -> 1).orElse(0);
+        return identifiersCount == 1;
     }
 
     public boolean hasIdentifiersOf(RecipientAddress address) {
         return (address.serviceId.isEmpty() || address.serviceId.equals(serviceId) || address.serviceId.equals(pni))
                 && (address.pni.isEmpty() || address.pni.equals(pni))
-                && (address.number.isEmpty() || address.number.equals(number));
+                && (address.number.isEmpty() || address.number.equals(number))
+                && (address.username.isEmpty() || address.username.equals(username));
     }
 
     public boolean hasAdditionalIdentifiersThan(RecipientAddress address) {
@@ -142,6 +153,10 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
                 number.isPresent() && (
                         address.number.isEmpty() || !address.number.equals(number)
                 )
+        ) || (
+                username.isPresent() && (
+                        address.username.isEmpty() || !address.username.equals(username)
+                )
         );
     }
 
@@ -154,10 +169,12 @@ public record RecipientAddress(Optional<ServiceId> serviceId, Optional<PNI> pni,
     }
 
     public SignalServiceAddress toSignalServiceAddress() {
-        return new SignalServiceAddress(getServiceId(), number);
+        return new SignalServiceAddress(serviceId.orElse(ServiceId.UNKNOWN), number);
     }
 
     public org.asamk.signal.manager.api.RecipientAddress toApiRecipientAddress() {
-        return new org.asamk.signal.manager.api.RecipientAddress(serviceId().map(ServiceId::uuid), number());
+        return new org.asamk.signal.manager.api.RecipientAddress(serviceId().map(ServiceId::uuid),
+                number(),
+                username());
     }
 }

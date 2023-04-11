@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.11.8] - 2023-04-05
+
+### Added
+- Added file attachment attributes to JSON output (Thanks @signals-from-outer-space)
+
+### Fixed
+- Scrub E164 number from dbus paths
+- Fix sending large text messages to multiple recipient
+- Fix deleting old group in dbus mode
+- Fix issue with unknown identity serviceId
+
+### Improved
+- Relaxed Content-Type check in http daemon mode (Thanks @cedb)
+
+## [0.11.7] - 2023-02-19
+**Attention**: Now requires native libsignal-client version 0.22.0
+
+### Fixed
+- Fix issue with missing pni identity key
+- Fix graalvm sqlite issue (Thanks @Marvin A. Ruder)
+- Fix issue with forgetting recipient
+
+### Changed
+- Allow JSON-RPC commands without account param if only one account exists
+
+## [0.11.6] - 2022-12-18
+
+### Added
+- Allow using data URIs for updateGroup/updateProfile
+- New alive check endpoint for http daemon (Thanks @ced-b)
+
+### Fixed
+- Registration with voice verification now works if no system locale is set
+- Fixed retrieving attachments in JSON RPC mode (Thanks @ced-b)
+
 ## [0.11.5.1] - 2022-11-09
 
 ### Fixed
