@@ -1,11 +1,12 @@
 package org.asamk.signal;
 
 import org.asamk.signal.manager.Manager;
+import org.asamk.signal.manager.api.GroupId;
 import org.asamk.signal.manager.api.MessageEnvelope;
 import org.asamk.signal.manager.api.RecipientAddress;
 import org.asamk.signal.manager.api.RecipientIdentifier;
+import org.asamk.signal.manager.api.TextStyle;
 import org.asamk.signal.manager.api.UntrustedIdentityException;
-import org.asamk.signal.manager.groups.GroupId;
 import org.asamk.signal.output.PlainTextWriter;
 import org.asamk.signal.util.DateUtils;
 import org.asamk.signal.util.Hex;
@@ -68,6 +69,10 @@ public class ReceiveMessageHandler implements Manager.ReceiveMessageHandler {
         if (envelope.data().isPresent()) {
             var message = envelope.data().get();
             printDataMessage(writer, message);
+        }
+        if (envelope.edit().isPresent()) {
+            var message = envelope.edit().get();
+            printEditMessage(writer, message);
         }
         if (envelope.story().isPresent()) {
             var message = envelope.story().get();
@@ -190,6 +195,13 @@ public class ReceiveMessageHandler implements Manager.ReceiveMessageHandler {
                 printAttachment(writer.indentedWriter(), attachment);
             }
         }
+    }
+
+    private void printEditMessage(
+            PlainTextWriter writer, MessageEnvelope.Edit message
+    ) {
+        writer.println("Edit: Target message timestamp: {}", DateUtils.formatTimestamp(message.targetSentTimestamp()));
+        printDataMessage(writer.indentedWriter(), message.dataMessage());
     }
 
     private void printStoryMessage(
@@ -562,7 +574,7 @@ public class ReceiveMessageHandler implements Manager.ReceiveMessageHandler {
     }
 
     private void printTextStyle(
-            PlainTextWriter writer, MessageEnvelope.Data.TextStyle textStyle
+            PlainTextWriter writer, TextStyle textStyle
     ) {
         writer.println("- {}: {} (length: {})", textStyle.style().name(), textStyle.start(), textStyle.length());
     }

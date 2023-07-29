@@ -92,9 +92,10 @@ public class RegisterCommand implements RegistrationCommand, JsonRpcRegistration
         } catch (NonNormalizedPhoneNumberException e) {
             throw new UserErrorException("Failed to register: " + e.getMessage(), e);
         } catch (IOException e) {
-            throw new IOErrorException("Failed to register: " + e.getMessage(), e);
+            throw new IOErrorException("Failed to register: %s (%s)".formatted(e.getMessage(),
+                    e.getClass().getSimpleName()), e);
         }
     }
 
-    record RegistrationParams(Boolean voice, String captcha) {}
+    public record RegistrationParams(Boolean voice, String captcha) {}
 }

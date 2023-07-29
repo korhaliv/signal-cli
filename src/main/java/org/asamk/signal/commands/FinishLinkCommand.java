@@ -34,6 +34,9 @@ public class FinishLinkCommand implements JsonRpcMultiCommand<FinishLinkCommand.
     public void handleCommand(
             final FinishLinkParams request, final MultiAccountManager m, final JsonWriter jsonWriter
     ) throws CommandException {
+        if (request.deviceLinkUri() == null) {
+            throw new UserErrorException("Missing deviceLinkUri.");
+        }
         final URI deviceLinkUri;
         try {
             deviceLinkUri = new URI(request.deviceLinkUri());
@@ -55,7 +58,11 @@ public class FinishLinkCommand implements JsonRpcMultiCommand<FinishLinkCommand.
         } catch (TimeoutException e) {
             throw new UserErrorException("Link request timed out, please try again.");
         } catch (IOException e) {
-            throw new IOErrorException("Link request error: " + e.getMessage(), e);
+            throw new IOErrorException("Link request error: "
+                    + e.getMessage()
+                    + " ("
+                    + e.getClass().getSimpleName()
+                    + ")", e);
         } catch (UserAlreadyExistsException e) {
             throw new UserErrorException("The user "
                     + e.getNumber()
@@ -67,7 +74,7 @@ public class FinishLinkCommand implements JsonRpcMultiCommand<FinishLinkCommand.
         jsonWriter.write(new JsonFinishLink(number));
     }
 
-    record FinishLinkParams(String deviceLinkUri, String deviceName) {}
+    public record FinishLinkParams(String deviceLinkUri, String deviceName) {}
 
     private record JsonFinishLink(String number) {}
 }

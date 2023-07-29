@@ -4,11 +4,21 @@ import org.asamk.Signal;
 import org.asamk.signal.BaseConfig;
 import org.asamk.signal.manager.Manager;
 import org.asamk.signal.manager.api.AttachmentInvalidException;
+import org.asamk.signal.manager.api.DeviceLinkUrl;
+import org.asamk.signal.manager.api.GroupId;
+import org.asamk.signal.manager.api.GroupInviteLinkUrl;
+import org.asamk.signal.manager.api.GroupLinkState;
+import org.asamk.signal.manager.api.GroupNotFoundException;
+import org.asamk.signal.manager.api.GroupPermission;
+import org.asamk.signal.manager.api.GroupSendingNotAllowedException;
+import org.asamk.signal.manager.api.IdentityVerificationCode;
 import org.asamk.signal.manager.api.InactiveGroupLinkException;
 import org.asamk.signal.manager.api.InvalidDeviceLinkException;
 import org.asamk.signal.manager.api.InvalidNumberException;
 import org.asamk.signal.manager.api.InvalidStickerException;
+import org.asamk.signal.manager.api.LastGroupAdminException;
 import org.asamk.signal.manager.api.Message;
+import org.asamk.signal.manager.api.NotAGroupMemberException;
 import org.asamk.signal.manager.api.NotPrimaryDeviceException;
 import org.asamk.signal.manager.api.PendingAdminApprovalException;
 import org.asamk.signal.manager.api.RecipientAddress;
@@ -21,14 +31,6 @@ import org.asamk.signal.manager.api.UnregisteredRecipientException;
 import org.asamk.signal.manager.api.UpdateGroup;
 import org.asamk.signal.manager.api.UpdateProfile;
 import org.asamk.signal.manager.api.UserStatus;
-import org.asamk.signal.manager.groups.GroupId;
-import org.asamk.signal.manager.groups.GroupInviteLinkUrl;
-import org.asamk.signal.manager.groups.GroupLinkState;
-import org.asamk.signal.manager.groups.GroupNotFoundException;
-import org.asamk.signal.manager.groups.GroupPermission;
-import org.asamk.signal.manager.groups.GroupSendingNotAllowedException;
-import org.asamk.signal.manager.groups.LastGroupAdminException;
-import org.asamk.signal.manager.groups.NotAGroupMemberException;
 import org.asamk.signal.util.SendMessageResultUtils;
 import org.freedesktop.dbus.DBusPath;
 import org.freedesktop.dbus.connections.impl.DBusConnection;
@@ -53,7 +55,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
+
+import static org.asamk.signal.dbus.DbusUtils.makeValidObjectPathElement;
 
 public class DbusSignalImpl implements Signal {
 
@@ -65,6 +70,7 @@ public class DbusSignalImpl implements Signal {
     private DBusPath thisDevice;
     private final List<StructDevice> devices = new ArrayList<>();
     private final List<StructGroup> groups = new ArrayList<>();
+    private final List<StructIdentity> identities = new ArrayList<>();
     private DbusReceiveMessageHandler dbusMessageHandler;
     private int subscriberCount;
 
@@ -97,6 +103,7 @@ public class DbusSignalImpl implements Signal {
         updateDevices();
         updateGroups();
         updateConfiguration();
+        updateIdentities();
     }
 
     public void close() {
@@ -111,6 +118,7 @@ public class DbusSignalImpl implements Signal {
         unExportDevices();
         unExportGroups();
         unExportConfiguration();
+        unExportIdentities();
         connection.unExportObject(this.objectPath);
     }
 
@@ -173,7 +181,8 @@ public class DbusSignalImpl implements Signal {
     @Override
     public void addDevice(String uri) {
         try {
-            m.addDeviceLink(new URI(uri));
+            var deviceLinkUrl = DeviceLinkUrl.parseDeviceLinkUri(new URI(uri));
+            m.addDeviceLink(deviceLinkUrl);
         } catch (IOException | InvalidDeviceLinkException e) {
             throw new Error.Failure(e.getClass().getSimpleName() + " Add device link failed. " + e.getMessage());
         } catch (URISyntaxException e) {
@@ -219,7 +228,8 @@ public class DbusSignalImpl implements Signal {
                             Optional.empty(),
                             Optional.empty(),
                             List.of(),
-                            Optional.empty()),
+                            Optional.empty(),
+                            List.of()),
                     getSingleRecipientIdentifiers(recipients, m.getSelfNumber()).stream()
                             .map(RecipientIdentifier.class::cast)
                             .collect(Collectors.toSet()));
@@ -388,7 +398,8 @@ public class DbusSignalImpl implements Signal {
                     Optional.empty(),
                     Optional.empty(),
                     List.of(),
-                    Optional.empty()), Set.of(RecipientIdentifier.NoteToSelf.INSTANCE));
+                    Optional.empty(),
+                    List.of()), Set.of(RecipientIdentifier.NoteToSelf.INSTANCE));
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (AttachmentInvalidException e) {
@@ -431,7 +442,8 @@ public class DbusSignalImpl implements Signal {
                     Optional.empty(),
                     Optional.empty(),
                     List.of(),
-                    Optional.empty()), Set.of(getGroupRecipientIdentifier(groupId)));
+                    Optional.empty(),
+                    List.of()), Set.of(getGroupRecipientIdentifier(groupId)));
             checkSendMessageResults(results);
             return results.timestamp();
         } catch (IOException | InvalidStickerException e) {
@@ -975,11 +987,7 @@ public class DbusSignalImpl implements Signal {
     }
 
     private static String getGroupObjectPath(String basePath, byte[] groupId) {
-        return basePath + "/Groups/" + Base64.getEncoder()
-                .encodeToString(groupId)
-                .replace("+", "_")
-                .replace("/", "_")
-                .replace("=", "_");
+        return basePath + "/Groups/" + makeValidObjectPathElement(Base64.getEncoder().encodeToString(groupId));
     }
 
     private void updateGroups() {
@@ -1023,6 +1031,112 @@ public class DbusSignalImpl implements Signal {
             logger.debug("Exported dbus object: " + object.getObjectPath());
         } catch (DBusException e) {
             e.printStackTrace();
+        }
+    }
+
+    private void updateIdentities() {
+        List<org.asamk.signal.manager.api.Identity> identities;
+        identities = m.getIdentities();
+
+        unExportIdentities();
+
+        identities.forEach(i -> {
+            final var object = new DbusSignalIdentityImpl(i);
+            exportObject(object);
+            this.identities.add(new StructIdentity(new DBusPath(object.getObjectPath()),
+                    i.recipient().uuid().map(UUID::toString).orElse(""),
+                    i.recipient().number().orElse("")));
+        });
+    }
+
+    private static String getIdentityObjectPath(String basePath, String id) {
+        return basePath + "/Identities/" + makeValidObjectPathElement(id);
+    }
+
+    private void unExportIdentities() {
+        this.identities.stream()
+                .map(StructIdentity::getObjectPath)
+                .map(DBusPath::getPath)
+                .forEach(connection::unExportObject);
+        this.identities.clear();
+    }
+
+    @Override
+    public DBusPath getIdentity(String number) throws Error.Failure {
+        final var found = identities.stream()
+                .filter(identity -> identity.getNumber().equals(number) || identity.getUuid().equals(number))
+                .findFirst();
+
+        if (found.isEmpty()) {
+            throw new Error.Failure("Identity for " + number + " unknown");
+        }
+        return found.get().getObjectPath();
+    }
+
+    @Override
+    public List<StructIdentity> listIdentities() {
+        updateIdentities();
+        return this.identities;
+    }
+
+    public class DbusSignalIdentityImpl extends DbusProperties implements Signal.Identity {
+
+        private final org.asamk.signal.manager.api.Identity identity;
+
+        public DbusSignalIdentityImpl(final org.asamk.signal.manager.api.Identity identity) {
+            this.identity = identity;
+            super.addPropertiesHandler(new DbusInterfacePropertiesHandler("org.asamk.Signal.Identity",
+                    List.of(new DbusProperty<>("Number", () -> identity.recipient().number().orElse("")),
+                            new DbusProperty<>("Uuid",
+                                    () -> identity.recipient().uuid().map(UUID::toString).orElse("")),
+                            new DbusProperty<>("Fingerprint", identity::getFingerprint),
+                            new DbusProperty<>("SafetyNumber", identity::safetyNumber),
+                            new DbusProperty<>("ScannableSafetyNumber", identity::scannableSafetyNumber),
+                            new DbusProperty<>("TrustLevel", identity::trustLevel),
+                            new DbusProperty<>("AddedDate", identity::dateAddedTimestamp))));
+        }
+
+        @Override
+        public String getObjectPath() {
+            return getIdentityObjectPath(objectPath, identity.recipient().getLegacyIdentifier());
+        }
+
+        @Override
+        public void trust() throws Error.Failure {
+            var recipient = RecipientIdentifier.Single.fromAddress(identity.recipient());
+            try {
+                m.trustIdentityAllKeys(recipient);
+            } catch (UnregisteredRecipientException e) {
+                throw new Error.Failure("The user " + e.getSender().getIdentifier() + " is not registered.");
+            }
+            updateIdentities();
+        }
+
+        @Override
+        public void trustVerified(String safetyNumber) throws Error.Failure {
+            var recipient = RecipientIdentifier.Single.fromAddress(identity.recipient());
+
+            if (safetyNumber == null) {
+                throw new Error.Failure("You need to specify a fingerprint/safety number");
+            }
+            final IdentityVerificationCode verificationCode;
+            try {
+                verificationCode = IdentityVerificationCode.parse(safetyNumber);
+            } catch (Exception e) {
+                throw new Error.Failure(
+                        "Safety number has invalid format, either specify the old hex fingerprint or the new safety number");
+            }
+
+            try {
+                final var res = m.trustIdentityVerified(recipient, verificationCode);
+                if (!res) {
+                    throw new Error.Failure(
+                            "Failed to set the trust for this number, make sure the number and the fingerprint/safety number are correct.");
+                }
+            } catch (UnregisteredRecipientException e) {
+                throw new Error.Failure("The user " + e.getSender().getIdentifier() + " is not registered.");
+            }
+            updateIdentities();
         }
     }
 
@@ -1070,8 +1184,7 @@ public class DbusSignalImpl implements Signal {
 
     public class DbusSignalConfigurationImpl extends DbusProperties implements Signal.Configuration {
 
-        public DbusSignalConfigurationImpl(
-        ) {
+        public DbusSignalConfigurationImpl() {
             super.addPropertiesHandler(new DbusInterfacePropertiesHandler("org.asamk.Signal.Configuration",
                     List.of(new DbusProperty<>("ReadReceipts", this::getReadReceipts, this::setReadReceipts),
                             new DbusProperty<>("UnidentifiedDeliveryIndicators",
