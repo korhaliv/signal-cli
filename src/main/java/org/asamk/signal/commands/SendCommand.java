@@ -9,13 +9,14 @@ import org.asamk.signal.commands.exceptions.UnexpectedErrorException;
 import org.asamk.signal.commands.exceptions.UserErrorException;
 import org.asamk.signal.manager.Manager;
 import org.asamk.signal.manager.api.AttachmentInvalidException;
+import org.asamk.signal.manager.api.GroupNotFoundException;
+import org.asamk.signal.manager.api.GroupSendingNotAllowedException;
 import org.asamk.signal.manager.api.InvalidStickerException;
 import org.asamk.signal.manager.api.Message;
+import org.asamk.signal.manager.api.NotAGroupMemberException;
 import org.asamk.signal.manager.api.RecipientIdentifier;
+import org.asamk.signal.manager.api.TextStyle;
 import org.asamk.signal.manager.api.UnregisteredRecipientException;
-import org.asamk.signal.manager.groups.GroupNotFoundException;
-import org.asamk.signal.manager.groups.GroupSendingNotAllowedException;
-import org.asamk.signal.manager.groups.NotAGroupMemberException;
 import org.asamk.signal.output.OutputWriter;
 import org.asamk.signal.util.CommandUtil;
 import org.asamk.signal.util.Hex;
@@ -66,6 +67,9 @@ public class SendCommand implements JsonRpcLocalCommand {
         subparser.addArgument("--mention")
                 .nargs("*")
                 .help("Mention another group member (syntax: start:length:recipientNumber)");
+        subparser.addArgument("--text-style")
+                .nargs("*")
+                .help("Style parts of the message text (syntax: start:length:STYLE)");
         subparser.addArgument("--quote-timestamp")
                 .type(long.class)
                 .help("Specify the timestamp of a previous message with the recipient or group to add a quote to the new message.");
@@ -74,6 +78,9 @@ public class SendCommand implements JsonRpcLocalCommand {
         subparser.addArgument("--quote-mention")
                 .nargs("*")
                 .help("Quote with mention of another group member (syntax: start:length:recipientNumber)");
+        subparser.addArgument("--quote-text-style")
+                .nargs("*")
+                .help("Quote with style parts of the message text (syntax: start:length:STYLE)");
         subparser.addArgument("--sticker").help("Send a sticker (syntax: stickerPackId:stickerId)");
         subparser.addArgument("--preview-url")
                 .help("Specify the url for the link preview (the same url must also appear in the message body).");
@@ -84,6 +91,9 @@ public class SendCommand implements JsonRpcLocalCommand {
                 .type(long.class)
                 .help("Specify the timestamp of a story to reply to.");
         subparser.addArgument("--story-author").help("Specify the number of the author of the story.");
+        subparser.addArgument("--edit-timestamp")
+                .type(long.class)
+                .help("Specify the timestamp of a previous message with the recipient or group to send an edited message.");
     }
 
     @Override
@@ -140,8 +150,15 @@ public class SendCommand implements JsonRpcLocalCommand {
             attachments = List.of();
         }
 
+        final var selfNumber = m.getSelfNumber();
+
         List<String> mentionStrings = ns.getList("mention");
-        final var mentions = mentionStrings == null ? List.<Message.Mention>of() : parseMentions(m, mentionStrings);
+        final var mentions = mentionStrings == null
+                ? List.<Message.Mention>of()
+                : parseMentions(selfNumber, mentionStrings);
+
+        List<String> textStyleStrings = ns.getList("text-style");
+        final var textStyles = textStyleStrings == null ? List.<TextStyle>of() : parseTextStyles(textStyleStrings);
 
         final Message.Quote quote;
         final var quoteTimestamp = ns.getLong("quote-timestamp");
@@ -151,11 +168,16 @@ public class SendCommand implements JsonRpcLocalCommand {
             List<String> quoteMentionStrings = ns.getList("quote-mention");
             final var quoteMentions = quoteMentionStrings == null
                     ? List.<Message.Mention>of()
-                    : parseMentions(m, quoteMentionStrings);
+                    : parseMentions(selfNumber, quoteMentionStrings);
+            List<String> quoteTextStyleStrings = ns.getList("quote-text-style");
+            final var quoteTextStyles = quoteTextStyleStrings == null
+                    ? List.<TextStyle>of()
+                    : parseTextStyles(quoteTextStyleStrings);
             quote = new Message.Quote(quoteTimestamp,
-                    CommandUtil.getSingleRecipientIdentifier(quoteAuthor, m.getSelfNumber()),
+                    CommandUtil.getSingleRecipientIdentifier(quoteAuthor, selfNumber),
                     quoteMessage == null ? "" : quoteMessage,
-                    quoteMentions);
+                    quoteMentions,
+                    quoteTextStyles);
         } else {
             quote = null;
         }
@@ -179,7 +201,7 @@ public class SendCommand implements JsonRpcLocalCommand {
         if (storyReplyTimestamp != null) {
             final var storyAuthor = ns.getString("story-author");
             storyReply = new Message.StoryReply(storyReplyTimestamp,
-                    CommandUtil.getSingleRecipientIdentifier(storyAuthor, m.getSelfNumber()));
+                    CommandUtil.getSingleRecipientIdentifier(storyAuthor, selfNumber));
         } else {
             storyReply = null;
         }
@@ -189,6 +211,8 @@ public class SendCommand implements JsonRpcLocalCommand {
                     "Sending empty message is not allowed, either a message, attachment or sticker must be given.");
         }
 
+        final var editTimestamp = ns.getLong("edit-timestamp");
+
         try {
             final var message = new Message(messageText,
                     attachments,
@@ -196,8 +220,11 @@ public class SendCommand implements JsonRpcLocalCommand {
                     Optional.ofNullable(quote),
                     Optional.ofNullable(sticker),
                     previews,
-                    Optional.ofNullable((storyReply)));
-            var results = m.sendMessage(message, recipientIdentifiers);
+                    Optional.ofNullable((storyReply)),
+                    textStyles);
+            var results = editTimestamp != null
+                    ? m.sendEditMessage(message, recipientIdentifiers, editTimestamp)
+                    : m.sendMessage(message, recipientIdentifiers);
             outputResult(outputWriter, results);
         } catch (AttachmentInvalidException | IOException e) {
             throw new UnexpectedErrorException("Failed to send message: " + e.getMessage() + " (" + e.getClass()
@@ -212,7 +239,7 @@ public class SendCommand implements JsonRpcLocalCommand {
     }
 
     private List<Message.Mention> parseMentions(
-            final Manager m, final List<String> mentionStrings
+            final String selfNumber, final List<String> mentionStrings
     ) throws UserErrorException {
         List<Message.Mention> mentions;
         final Pattern mentionPattern = Pattern.compile("(\\d+):(\\d+):(.+)");
@@ -222,12 +249,37 @@ public class SendCommand implements JsonRpcLocalCommand {
             if (!matcher.matches()) {
                 throw new UserErrorException("Invalid mention syntax ("
                         + mention
-                        + ") expected 'start:end:recipientNumber'");
+                        + ") expected 'start:length:recipientNumber'");
             }
-            mentions.add(new Message.Mention(CommandUtil.getSingleRecipientIdentifier(matcher.group(3),
-                    m.getSelfNumber()), Integer.parseInt(matcher.group(1)), Integer.parseInt(matcher.group(2))));
+            mentions.add(new Message.Mention(CommandUtil.getSingleRecipientIdentifier(matcher.group(3), selfNumber),
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2))));
         }
         return mentions;
+    }
+
+    private List<TextStyle> parseTextStyles(
+            final List<String> textStylesStrings
+    ) throws UserErrorException {
+        List<TextStyle> textStyles;
+        final Pattern textStylePattern = Pattern.compile("(\\d+):(\\d+):(.+)");
+        textStyles = new ArrayList<>();
+        for (final var textStyle : textStylesStrings) {
+            final var matcher = textStylePattern.matcher(textStyle);
+            if (!matcher.matches()) {
+                throw new UserErrorException("Invalid textStyle syntax ("
+                        + textStyle
+                        + ") expected 'start:length:STYLE'");
+            }
+            final var style = TextStyle.Style.from(matcher.group(3));
+            if (style == null) {
+                throw new UserErrorException("Invalid style: " + matcher.group(3));
+            }
+            textStyles.add(new TextStyle(style,
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2))));
+        }
+        return textStyles;
     }
 
     private Message.Sticker parseSticker(final String stickerString) throws UserErrorException {

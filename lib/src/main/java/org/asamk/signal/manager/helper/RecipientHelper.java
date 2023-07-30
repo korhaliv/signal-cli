@@ -1,9 +1,9 @@
 package org.asamk.signal.manager.helper;
 
-import org.asamk.signal.manager.SignalDependencies;
 import org.asamk.signal.manager.api.RecipientIdentifier;
 import org.asamk.signal.manager.api.UnregisteredRecipientException;
 import org.asamk.signal.manager.config.ServiceEnvironmentConfig;
+import org.asamk.signal.manager.internal.SignalDependencies;
 import org.asamk.signal.manager.storage.SignalAccount;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
 import org.signal.libsignal.usernames.BaseUsernameException;
@@ -107,7 +107,11 @@ public class RecipientHelper {
         try {
             return Optional.of(resolveRecipient(recipient));
         } catch (UnregisteredRecipientException e) {
-            return Optional.empty();
+            if (recipient instanceof RecipientIdentifier.Number r) {
+                return account.getRecipientStore().resolveRecipientByNumberOptional(r.number());
+            } else {
+                return Optional.empty();
+            }
         }
     }
 
@@ -159,6 +163,7 @@ public class RecipientHelper {
                             useCompat,
                             Optional.empty(),
                             serviceEnvironmentConfig.getCdsiMrenclave(),
+                            null,
                             token -> {
                                 // Not storing for partial refresh
                             });
@@ -176,7 +181,7 @@ public class RecipientHelper {
 
     private ACI getRegisteredUserByUsername(String username) throws IOException, BaseUsernameException {
         return dependencies.getAccountManager()
-                .getAciByUsernameHash(Base64UrlSafe.encodeBytesWithoutPadding(Username.hash(username)));
+                .getAciByUsernameHash(Base64UrlSafe.encodeBytesWithoutPadding(new Username(username).getHash()));
     }
 
     public record RegisteredUser(Optional<ACI> aci, Optional<PNI> pni) {

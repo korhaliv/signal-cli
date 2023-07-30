@@ -5,14 +5,25 @@ import org.asamk.signal.DbusConfig;
 import org.asamk.signal.manager.Manager;
 import org.asamk.signal.manager.api.AttachmentInvalidException;
 import org.asamk.signal.manager.api.Configuration;
+import org.asamk.signal.manager.api.Contact;
 import org.asamk.signal.manager.api.Device;
+import org.asamk.signal.manager.api.DeviceLinkUrl;
 import org.asamk.signal.manager.api.Group;
+import org.asamk.signal.manager.api.GroupId;
+import org.asamk.signal.manager.api.GroupInviteLinkUrl;
+import org.asamk.signal.manager.api.GroupNotFoundException;
+import org.asamk.signal.manager.api.GroupPermission;
+import org.asamk.signal.manager.api.GroupSendingNotAllowedException;
 import org.asamk.signal.manager.api.Identity;
+import org.asamk.signal.manager.api.IdentityVerificationCode;
 import org.asamk.signal.manager.api.InactiveGroupLinkException;
 import org.asamk.signal.manager.api.InvalidDeviceLinkException;
+import org.asamk.signal.manager.api.InvalidStickerException;
 import org.asamk.signal.manager.api.InvalidUsernameException;
+import org.asamk.signal.manager.api.LastGroupAdminException;
 import org.asamk.signal.manager.api.Message;
 import org.asamk.signal.manager.api.MessageEnvelope;
+import org.asamk.signal.manager.api.NotAGroupMemberException;
 import org.asamk.signal.manager.api.NotPrimaryDeviceException;
 import org.asamk.signal.manager.api.Pair;
 import org.asamk.signal.manager.api.ReceiveConfig;
@@ -25,18 +36,10 @@ import org.asamk.signal.manager.api.StickerPack;
 import org.asamk.signal.manager.api.StickerPackInvalidException;
 import org.asamk.signal.manager.api.StickerPackUrl;
 import org.asamk.signal.manager.api.TypingAction;
+import org.asamk.signal.manager.api.UnregisteredRecipientException;
 import org.asamk.signal.manager.api.UpdateGroup;
 import org.asamk.signal.manager.api.UpdateProfile;
 import org.asamk.signal.manager.api.UserStatus;
-import org.asamk.signal.manager.groups.GroupId;
-import org.asamk.signal.manager.groups.GroupInviteLinkUrl;
-import org.asamk.signal.manager.groups.GroupNotFoundException;
-import org.asamk.signal.manager.groups.GroupPermission;
-import org.asamk.signal.manager.groups.GroupSendingNotAllowedException;
-import org.asamk.signal.manager.groups.LastGroupAdminException;
-import org.asamk.signal.manager.groups.NotAGroupMemberException;
-import org.asamk.signal.manager.storage.recipients.Contact;
-import org.asamk.signal.manager.storage.recipients.Profile;
 import org.freedesktop.dbus.DBusMap;
 import org.freedesktop.dbus.DBusPath;
 import org.freedesktop.dbus.connections.impl.DBusConnection;
@@ -198,8 +201,8 @@ public class DbusManagerImpl implements Manager {
     }
 
     @Override
-    public void addDeviceLink(final URI linkUri) throws IOException, InvalidDeviceLinkException {
-        signal.addDevice(linkUri.toString());
+    public void addDeviceLink(final DeviceLinkUrl linkUri) throws IOException, InvalidDeviceLinkException {
+        signal.addDevice(linkUri.createDeviceLinkUri().toString());
     }
 
     @Override
@@ -209,11 +212,6 @@ public class DbusManagerImpl implements Manager {
         } else {
             signal.removePin();
         }
-    }
-
-    @Override
-    public Profile getRecipientProfile(final RecipientIdentifier.Single recipient) {
-        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -367,6 +365,13 @@ public class DbusManagerImpl implements Manager {
                 numbers -> signal.sendMessage(message.messageText(), message.attachments(), numbers),
                 () -> signal.sendNoteToSelfMessage(message.messageText(), message.attachments()),
                 groupId -> signal.sendGroupMessage(message.messageText(), message.attachments(), groupId));
+    }
+
+    @Override
+    public SendMessageResults sendEditMessage(
+            final Message message, final Set<RecipientIdentifier> recipients, final long editTargetTimestamp
+    ) throws IOException, AttachmentInvalidException, NotAGroupMemberException, GroupNotFoundException, GroupSendingNotAllowedException, UnregisteredRecipientException, InvalidStickerException {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -566,11 +571,6 @@ public class DbusManagerImpl implements Manager {
     }
 
     @Override
-    public boolean hasCaughtUpWithOldMessages() {
-        return true;
-    }
-
-    @Override
     public boolean isContactBlocked(final RecipientIdentifier.Single recipient) {
         return signal.isContactBlocked(recipient.getIdentifier());
     }
@@ -668,20 +668,8 @@ public class DbusManagerImpl implements Manager {
     }
 
     @Override
-    public boolean trustIdentityVerified(final RecipientIdentifier.Single recipient, final byte[] fingerprint) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean trustIdentityVerifiedSafetyNumber(
-            final RecipientIdentifier.Single recipient, final String safetyNumber
-    ) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean trustIdentityVerifiedSafetyNumber(
-            final RecipientIdentifier.Single recipient, final byte[] safetyNumber
+    public boolean trustIdentityVerified(
+            final RecipientIdentifier.Single recipient, final IdentityVerificationCode verificationCode
     ) {
         throw new UnsupportedOperationException();
     }
@@ -801,6 +789,7 @@ public class DbusManagerImpl implements Manager {
                                 List.of())),
                         Optional.empty(),
                         Optional.empty(),
+                        Optional.empty(),
                         Optional.empty());
                 notifyMessageHandlers(envelope);
             };
@@ -827,6 +816,7 @@ public class DbusManagerImpl implements Manager {
                         Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
+                        Optional.empty(),
                         Optional.empty());
                 notifyMessageHandlers(envelope);
             };
@@ -841,6 +831,7 @@ public class DbusManagerImpl implements Manager {
                         0,
                         0,
                         false,
+                        Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
                         Optional.empty(),
@@ -874,6 +865,7 @@ public class DbusManagerImpl implements Manager {
                                         List.of(),
                                         List.of(),
                                         List.of())),
+                                Optional.empty(),
                                 Optional.empty())),
                                 Optional.empty(),
                                 List.of(),

@@ -16,14 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        java: [ '17', '19' ]
+        java: [ '17', '20' ]
 
     steps:
       - uses: actions/checkout@v3
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
-          distribution: 'adopt'
+          distribution: 'temurin'
           java-version: ${{ matrix.java }}
           cache: 'gradle'
       - name: Build with Gradle

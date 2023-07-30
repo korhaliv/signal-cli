@@ -1,19 +1,20 @@
 package org.asamk.signal.manager.helper;
 
-import org.asamk.signal.manager.DeviceLinkInfo;
-import org.asamk.signal.manager.SignalDependencies;
 import org.asamk.signal.manager.api.CaptchaRequiredException;
+import org.asamk.signal.manager.api.DeviceLinkUrl;
 import org.asamk.signal.manager.api.IncorrectPinException;
 import org.asamk.signal.manager.api.InvalidDeviceLinkException;
 import org.asamk.signal.manager.api.NonNormalizedPhoneNumberException;
 import org.asamk.signal.manager.api.PinLockedException;
 import org.asamk.signal.manager.api.RateLimitException;
+import org.asamk.signal.manager.internal.SignalDependencies;
 import org.asamk.signal.manager.storage.SignalAccount;
 import org.asamk.signal.manager.util.KeyUtils;
 import org.asamk.signal.manager.util.NumberVerificationUtils;
 import org.asamk.signal.manager.util.Utils;
 import org.signal.libsignal.protocol.IdentityKeyPair;
 import org.signal.libsignal.protocol.InvalidKeyException;
+import org.signal.libsignal.protocol.state.KyberPreKeyRecord;
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord;
 import org.signal.libsignal.usernames.BaseUsernameException;
 import org.signal.libsignal.usernames.Username;
@@ -28,6 +29,7 @@ import org.whispersystems.signalservice.api.push.exceptions.AlreadyVerifiedExcep
 import org.whispersystems.signalservice.api.push.exceptions.AuthorizationFailedException;
 import org.whispersystems.signalservice.api.push.exceptions.DeprecatedVersionException;
 import org.whispersystems.signalservice.api.util.DeviceNameUtil;
+import org.whispersystems.signalservice.internal.push.KyberPreKeyEntity;
 import org.whispersystems.signalservice.internal.push.OutgoingPushMessage;
 import org.whispersystems.util.Base64UrlSafe;
 
@@ -112,27 +114,28 @@ public class AccountHelper {
         account.setNumber(number);
         account.setAci(aci);
         account.setPni(pni);
-        if (account.isPrimaryDevice() && account.getPniIdentityKeyPair() == null && account.getPni() != null) {
+        if (account.isPrimaryDevice() && account.getPniIdentityKeyPair() == null) {
             account.setPniIdentityKeyPair(KeyUtils.generateIdentityKeyPair());
         }
         account.getRecipientTrustedResolver().resolveSelfRecipientTrusted(account.getSelfRecipientAddress());
         // TODO check and update remote storage
         context.getUnidentifiedAccessHelper().rotateSenderCertificates();
         dependencies.resetAfterAddressChange();
+        context.getGroupV2Helper().clearAuthCredentialCache();
         context.getAccountFileUpdater().updateAccountIdentifiers(account.getNumber(), account.getAci());
     }
 
     public void setPni(
             final PNI updatedPni,
             final IdentityKeyPair pniIdentityKeyPair,
+            final String number,
+            final int localPniRegistrationId,
             final SignedPreKeyRecord pniSignedPreKey,
-            final int localPniRegistrationId
+            final KyberPreKeyRecord lastResortKyberPreKey
     ) throws IOException {
-        account.setPni(updatedPni, pniIdentityKeyPair, pniSignedPreKey, localPniRegistrationId);
+        updateSelfIdentifiers(number != null ? number : account.getNumber(), account.getAci(), updatedPni);
+        account.setNewPniIdentity(pniIdentityKeyPair, pniSignedPreKey, lastResortKyberPreKey, localPniRegistrationId);
         context.getPreKeyHelper().refreshPreKeysIfNecessary(ServiceIdType.PNI);
-        if (account.getPni() == null || !account.getPni().equals(updatedPni)) {
-            context.getGroupV2Helper().clearAuthCredentialCache();
-        }
     }
 
     public void startChangeNumber(
@@ -153,6 +156,7 @@ public class AccountHelper {
         // TODO create new PNI identity key
         final List<OutgoingPushMessage> deviceMessages = null;
         final Map<String, SignedPreKeyEntity> devicePniSignedPreKeys = null;
+        final Map<String, KyberPreKeyEntity> devicePniLastResortKyberPrekeys = null;
         final Map<String, Integer> pniRegistrationIds = null;
         var sessionId = account.getSessionId(account.getNumber());
         final var result = NumberVerificationUtils.verifyNumber(sessionId,
@@ -174,6 +178,7 @@ public class AccountHelper {
                             account.getPniIdentityKeyPair().getPublicKey(),
                             deviceMessages,
                             devicePniSignedPreKeys,
+                            devicePniLastResortKyberPrekeys,
                             pniRegistrationIds)));
                 });
         // TODO handle response
@@ -193,10 +198,10 @@ public class AccountHelper {
             }
         }
 
-        final var candidates = Username.generateCandidates(nickname, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH);
+        final var candidates = Username.candidatesFrom(nickname, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH);
         final var candidateHashes = new ArrayList<String>();
         for (final var candidate : candidates) {
-            candidateHashes.add(Base64UrlSafe.encodeBytesWithoutPadding(Username.hash(candidate)));
+            candidateHashes.add(Base64UrlSafe.encodeBytesWithoutPadding(candidate.getHash()));
         }
 
         final var response = dependencies.getAccountManager().reserveUsername(candidateHashes);
@@ -207,7 +212,7 @@ public class AccountHelper {
         }
 
         logger.debug("[reserveUsername] Successfully reserved username.");
-        final var username = candidates.get(hashIndex);
+        final var username = candidates.get(hashIndex).getUsername();
 
         dependencies.getAccountManager().confirmUsername(username, response);
         account.setUsername(username);
@@ -226,7 +231,7 @@ public class AccountHelper {
         final var whoAmIResponse = dependencies.getAccountManager().getWhoAmI();
         final var serverUsernameHash = whoAmIResponse.getUsernameHash();
         final var hasServerUsername = !isEmpty(serverUsernameHash);
-        final var localUsernameHash = Base64UrlSafe.encodeBytesWithoutPadding(Username.hash(localUsername));
+        final var localUsernameHash = Base64UrlSafe.encodeBytesWithoutPadding(new Username(localUsername).getHash());
 
         if (!hasServerUsername) {
             logger.debug("No remote username is set.");
@@ -267,7 +272,7 @@ public class AccountHelper {
         dependencies.getAccountManager().setAccountAttributes(account.getAccountAttributes(null));
     }
 
-    public void addDevice(DeviceLinkInfo deviceLinkInfo) throws IOException, InvalidDeviceLinkException {
+    public void addDevice(DeviceLinkUrl deviceLinkInfo) throws IOException, InvalidDeviceLinkException {
         var verificationCode = dependencies.getAccountManager().getNewDeviceVerificationCode();
 
         try {

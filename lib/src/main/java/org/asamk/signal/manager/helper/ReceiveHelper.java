@@ -1,10 +1,10 @@
 package org.asamk.signal.manager.helper;
 
 import org.asamk.signal.manager.Manager;
-import org.asamk.signal.manager.SignalDependencies;
 import org.asamk.signal.manager.actions.HandleAction;
 import org.asamk.signal.manager.api.ReceiveConfig;
 import org.asamk.signal.manager.api.UntrustedIdentityException;
+import org.asamk.signal.manager.internal.SignalDependencies;
 import org.asamk.signal.manager.storage.SignalAccount;
 import org.asamk.signal.manager.storage.messageCache.CachedMessage;
 import org.asamk.signal.manager.storage.recipients.RecipientAddress;
@@ -59,10 +59,6 @@ public class ReceiveHelper {
 
     public void setNeedsToRetryFailedMessages(final boolean needsToRetryFailedMessages) {
         this.needsToRetryFailedMessages = needsToRetryFailedMessages;
-    }
-
-    public boolean hasCaughtUpWithOldMessages() {
-        return hasCaughtUpWithOldMessages;
     }
 
     public void setAuthenticationFailureListener(final Callable authenticationFailureListener) {
@@ -151,13 +147,17 @@ public class ReceiveHelper {
                     for (final var it : batch) {
                         SignalServiceEnvelope envelope1 = new SignalServiceEnvelope(it.getEnvelope(),
                                 it.getServerDeliveredTimestamp());
-                        final var recipientId = envelope1.hasSourceUuid() ? account.getRecipientResolver()
+                        final var recipientId = envelope1.hasSourceServiceId() ? account.getRecipientResolver()
                                 .resolveRecipient(envelope1.getSourceAddress()) : null;
                         logger.trace("Storing new message from {}", recipientId);
                         // store message on disk, before acknowledging receipt to the server
                         cachedMessage[0] = account.getMessageCache().cacheMessage(envelope1, recipientId);
+                        try {
+                            signalWebSocket.sendAck(it);
+                        } catch (IOException e) {
+                            logger.warn("Failed to ack envelope to server after storing it: {}", e.getMessage());
+                        }
                     }
-                    return true;
                 });
                 isWaitingForMessage = false;
                 backOffCounter = 0;
@@ -226,7 +226,7 @@ public class ReceiveHelper {
                 if (exception instanceof UntrustedIdentityException) {
                     logger.debug("Keeping message with untrusted identity in message cache");
                     final var address = ((UntrustedIdentityException) exception).getSender();
-                    if (!envelope.hasSourceUuid() && address.uuid().isPresent()) {
+                    if (!envelope.hasSourceServiceId() && address.uuid().isPresent()) {
                         final var recipientId = account.getRecipientResolver()
                                 .resolveRecipient(ServiceId.from(address.uuid().get()));
                         try {
@@ -273,7 +273,7 @@ public class ReceiveHelper {
                 cachedMessage.delete();
                 return null;
             }
-            if (!envelope.hasSourceUuid()) {
+            if (!envelope.hasSourceServiceId()) {
                 final var identifier = ((UntrustedIdentityException) exception).getSender();
                 final var recipientId = account.getRecipientResolver()
                         .resolveRecipient(new RecipientAddress(identifier));

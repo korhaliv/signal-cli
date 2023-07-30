@@ -1,9 +1,9 @@
 package org.asamk.signal.manager.helper;
 
-import org.asamk.signal.manager.SignalDependencies;
 import org.asamk.signal.manager.api.PhoneNumberSharingMode;
+import org.asamk.signal.manager.api.Profile;
+import org.asamk.signal.manager.internal.SignalDependencies;
 import org.asamk.signal.manager.storage.SignalAccount;
-import org.asamk.signal.manager.storage.recipients.Profile;
 import org.asamk.signal.manager.storage.recipients.RecipientId;
 import org.signal.libsignal.metadata.certificate.InvalidCertificateException;
 import org.signal.libsignal.metadata.certificate.SenderCertificate;
@@ -71,7 +71,8 @@ public class UnidentifiedAccessHelper {
 
         try {
             return Optional.of(new UnidentifiedAccessPair(new UnidentifiedAccess(recipientUnidentifiedAccessKey,
-                    senderCertificate), new UnidentifiedAccess(selfUnidentifiedAccessKey, senderCertificate)));
+                    senderCertificate,
+                    false), new UnidentifiedAccess(selfUnidentifiedAccessKey, senderCertificate, false)));
         } catch (InvalidCertificateException e) {
             return Optional.empty();
         }
@@ -87,8 +88,9 @@ public class UnidentifiedAccessHelper {
 
         try {
             return Optional.of(new UnidentifiedAccessPair(new UnidentifiedAccess(selfUnidentifiedAccessKey,
-                    selfUnidentifiedAccessCertificate),
-                    new UnidentifiedAccess(selfUnidentifiedAccessKey, selfUnidentifiedAccessCertificate)));
+                    selfUnidentifiedAccessCertificate,
+                    false),
+                    new UnidentifiedAccess(selfUnidentifiedAccessKey, selfUnidentifiedAccessCertificate, false)));
         } catch (InvalidCertificateException e) {
             return Optional.empty();
         }
@@ -166,18 +168,11 @@ public class UnidentifiedAccessHelper {
     private static byte[] getTargetUnidentifiedAccessKey(
             final Profile targetProfile, final ProfileKey theirProfileKey
     ) {
-        switch (targetProfile.getUnidentifiedAccessMode()) {
-            case ENABLED:
-                if (theirProfileKey == null) {
-                    return null;
-                }
-
-                return UnidentifiedAccess.deriveAccessKeyFrom(theirProfileKey);
-            case UNRESTRICTED:
-                return createUnrestrictedUnidentifiedAccess();
-            default:
-                return null;
-        }
+        return switch (targetProfile.getUnidentifiedAccessMode()) {
+            case ENABLED -> theirProfileKey == null ? null : UnidentifiedAccess.deriveAccessKeyFrom(theirProfileKey);
+            case UNRESTRICTED -> createUnrestrictedUnidentifiedAccess();
+            default -> null;
+        };
     }
 
     private static byte[] createUnrestrictedUnidentifiedAccess() {

@@ -1,6 +1,5 @@
 package org.asamk.signal.manager.api;
 
-import org.asamk.signal.manager.groups.GroupId;
 import org.asamk.signal.manager.groups.GroupUtils;
 import org.asamk.signal.manager.helper.RecipientAddressResolver;
 import org.asamk.signal.manager.storage.recipients.RecipientResolver;
@@ -9,6 +8,7 @@ import org.whispersystems.signalservice.api.messages.SignalServiceAttachment;
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer;
 import org.whispersystems.signalservice.api.messages.SignalServiceContent;
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage;
+import org.whispersystems.signalservice.api.messages.SignalServiceEditMessage;
 import org.whispersystems.signalservice.api.messages.SignalServiceEnvelope;
 import org.whispersystems.signalservice.api.messages.SignalServiceGroup;
 import org.whispersystems.signalservice.api.messages.SignalServiceGroupContext;
@@ -51,6 +51,7 @@ public record MessageEnvelope(
         Optional<Receipt> receipt,
         Optional<Typing> typing,
         Optional<Data> data,
+        Optional<Edit> edit,
         Optional<Sync> sync,
         Optional<Call> call,
         Optional<Story> story
@@ -513,31 +514,18 @@ public record MessageEnvelope(
             }
         }
 
-        public record TextStyle(Style style, int start, int length) {
+    }
 
-            public enum Style {
-                NONE,
-                BOLD,
-                ITALIC,
-                SPOILER,
-                STRIKETHROUGH,
-                MONOSPACE;
+    public record Edit(long targetSentTimestamp, Data dataMessage) {
 
-                static Style from(BodyRange.Style style) {
-                    return switch (style) {
-                        case NONE -> NONE;
-                        case BOLD -> BOLD;
-                        case ITALIC -> ITALIC;
-                        case SPOILER -> SPOILER;
-                        case STRIKETHROUGH -> STRIKETHROUGH;
-                        case MONOSPACE -> MONOSPACE;
-                    };
-                }
-            }
-
-            static TextStyle from(BodyRange bodyRange) {
-                return new TextStyle(Style.from(bodyRange.getStyle()), bodyRange.getStart(), bodyRange.getLength());
-            }
+        public static Edit from(
+                final SignalServiceEditMessage editMessage,
+                RecipientResolver recipientResolver,
+                RecipientAddressResolver addressResolver,
+                final AttachmentFileProvider fileProvider
+        ) {
+            return new Edit(editMessage.getTargetSentTimestamp(),
+                    Data.from(editMessage.getDataMessage(), recipientResolver, addressResolver, fileProvider));
         }
     }
 
@@ -582,6 +570,7 @@ public record MessageEnvelope(
                 Optional<RecipientAddress> destination,
                 Set<RecipientAddress> recipients,
                 Optional<Data> message,
+                Optional<Edit> editMessage,
                 Optional<Story> story
         ) {
 
@@ -603,6 +592,8 @@ public record MessageEnvelope(
                                 .collect(Collectors.toSet()),
                         sentMessage.getDataMessage()
                                 .map(message -> Data.from(message, recipientResolver, addressResolver, fileProvider)),
+                        sentMessage.getEditMessage()
+                                .map(message -> Edit.from(message, recipientResolver, addressResolver, fileProvider)),
                         sentMessage.getStoryMessage().map(s -> Story.from(s, fileProvider)));
             }
         }
@@ -717,7 +708,9 @@ public record MessageEnvelope(
             Optional<Hangup> hangup,
             Optional<Busy> busy,
             List<IceUpdate> iceUpdate,
-            Optional<Opaque> opaque
+            Optional<Opaque> opaque,
+            boolean isMultiRing,
+            boolean isUrgent
     ) {
 
         public static Call from(final SignalServiceCallMessage callMessage) {
@@ -731,7 +724,9 @@ public record MessageEnvelope(
                     callMessage.getIceUpdateMessages()
                             .map(m -> m.stream().map(IceUpdate::from).toList())
                             .orElse(List.of()),
-                    callMessage.getOpaqueMessage().map(Opaque::from));
+                    callMessage.getOpaqueMessage().map(Opaque::from),
+                    callMessage.isMultiRing(),
+                    callMessage.isUrgent());
         }
 
         public record Offer(long id, String sdp, Type type, byte[] opaque) {
@@ -904,7 +899,7 @@ public record MessageEnvelope(
             final AttachmentFileProvider fileProvider,
             Exception exception
     ) {
-        final var source = !envelope.isUnidentifiedSender() && envelope.hasSourceUuid()
+        final var source = !envelope.isUnidentifiedSender() && envelope.hasSourceServiceId()
                 ? recipientResolver.resolveRecipient(envelope.getSourceAddress())
                 : envelope.isUnidentifiedSender() && content != null
                         ? recipientResolver.resolveRecipient(content.getSender())
@@ -920,6 +915,7 @@ public record MessageEnvelope(
         Optional<Receipt> receipt;
         Optional<Typing> typing;
         Optional<Data> data;
+        Optional<Edit> edit;
         Optional<Sync> sync;
         Optional<Call> call;
         Optional<Story> story;
@@ -928,6 +924,7 @@ public record MessageEnvelope(
             typing = content.getTypingMessage().map(Typing::from);
             data = content.getDataMessage()
                     .map(dataMessage -> Data.from(dataMessage, recipientResolver, addressResolver, fileProvider));
+            edit = content.getEditMessage().map(s -> Edit.from(s, recipientResolver, addressResolver, fileProvider));
             sync = content.getSyncMessage().map(s -> Sync.from(s, recipientResolver, addressResolver, fileProvider));
             call = content.getCallMessage().map(Call::from);
             story = content.getStoryMessage().map(s -> Story.from(s, fileProvider));
@@ -937,6 +934,7 @@ public record MessageEnvelope(
                     List.of(envelope.getTimestamp()))) : Optional.empty();
             typing = Optional.empty();
             data = Optional.empty();
+            edit = Optional.empty();
             sync = Optional.empty();
             call = Optional.empty();
             story = Optional.empty();
@@ -953,6 +951,7 @@ public record MessageEnvelope(
                 receipt,
                 typing,
                 data,
+                edit,
                 sync,
                 call,
                 story);

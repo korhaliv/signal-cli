@@ -18,8 +18,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.function.BiFunction;
 
-import static org.asamk.signal.manager.config.ServiceConfig.capabilities;
-
 public class IdentityHelper {
 
     private final static Logger logger = LoggerFactory.getLogger(IdentityHelper.class);
@@ -75,7 +73,7 @@ public class IdentityHelper {
         final var recipientId = account.getRecipientResolver().resolveRecipient(serviceId);
         final var address = account.getRecipientAddressResolver().resolveRecipientAddress(recipientId);
 
-        if (capabilities.getUuid()) {
+        if (false) {
             if (serviceId.isUnknown()) {
                 return null;
             }
@@ -96,10 +94,8 @@ public class IdentityHelper {
     private boolean trustIdentity(
             RecipientId recipientId, BiFunction<ServiceId, IdentityKey, Boolean> verifier, TrustLevel trustLevel
     ) {
-        final var serviceId = account.getRecipientAddressResolver()
-                .resolveRecipientAddress(recipientId)
-                .serviceId()
-                .orElse(null);
+        final var address = account.getRecipientAddressResolver().resolveRecipientAddress(recipientId);
+        final var serviceId = address.serviceId().orElse(null);
         if (serviceId == null) {
             return false;
         }
@@ -114,9 +110,8 @@ public class IdentityHelper {
 
         account.getIdentityKeyStore().setIdentityTrustLevel(serviceId, identity.getIdentityKey(), trustLevel);
         try {
-            final var address = context.getRecipientHelper()
-                    .resolveSignalServiceAddress(account.getRecipientResolver().resolveRecipient(serviceId));
-            context.getSyncHelper().sendVerifiedMessage(address, identity.getIdentityKey(), trustLevel);
+            context.getSyncHelper()
+                    .sendVerifiedMessage(address.toSignalServiceAddress(), identity.getIdentityKey(), trustLevel);
         } catch (IOException e) {
             logger.warn("Failed to send verification sync message: {}", e.getMessage());
         }
